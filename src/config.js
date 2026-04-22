@@ -1,0 +1,178 @@
+import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+
+import {
+  DEFAULT_DEBUG_PORT,
+  ENV_CONFIG,
+  ENV_DEBUG_PORT,
+  getStateHome,
+  RESEARCH_FILES,
+} from "./constants.js";
+import { ensureDirSync, normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
+
+export function getWorkspaceRoot() {
+  return process.env.LIEPIN_WORKSPACE_ROOT
+    ? path.resolve(process.env.LIEPIN_WORKSPACE_ROOT)
+    : path.resolve(process.cwd());
+}
+
+export function resolveRuntimeLayout(workspaceRoot = getWorkspaceRoot()) {
+  const stateHome = getStateHome();
+  const runsDir = path.join(stateHome, "runs");
+  const logsDir = path.join(stateHome, "logs");
+  const researchDir = path.join(stateHome, "research");
+  const configPath = resolveScreeningConfigPath(workspaceRoot);
+  return {
+    workspaceRoot: path.resolve(workspaceRoot),
+    stateHome,
+    runsDir,
+    logsDir,
+    researchDir,
+    configPath,
+    directories: [stateHome, runsDir, logsDir, researchDir]
+  };
+}
+
+export function ensureRuntimeLayout(workspaceRoot = getWorkspaceRoot()) {
+  const layout = resolveRuntimeLayout(workspaceRoot);
+  for (const directory of layout.directories) {
+    ensureDirSync(directory);
+  }
+  return layout;
+}
+
+export function resolveScreeningConfigPath(workspaceRoot = getWorkspaceRoot()) {
+  if (process.env[ENV_CONFIG]) {
+    return path.resolve(process.env[ENV_CONFIG]);
+  }
+  const workspaceConfig = path.join(path.resolve(workspaceRoot), "config", "screening-config.json");
+  if (fs.existsSync(workspaceConfig)) return workspaceConfig;
+  return path.join(getStateHome(), "screening-config.json");
+}
+
+export function validateScreeningConfig(config) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    return {
+      ok: false,
+      message: "screening-config.json 缺失或格式无效，请填写 baseUrl、apiKey、model。"
+    };
+  }
+  const missing = [];
+  if (!normalizeText(config.baseUrl)) missing.push("baseUrl");
+  if (!normalizeText(config.apiKey)) missing.push("apiKey");
+  if (!normalizeText(config.model)) missing.push("model");
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `screening-config.json 缺少必填字段：${missing.join(", ")}`
+    };
+  }
+  if (/^replace-with/i.test(normalizeText(config.apiKey))) {
+    return {
+      ok: false,
+      message: "screening-config.json 的 apiKey 仍是模板占位符，请填写真实值"
+    };
+  }
+  return { ok: true };
+}
+
+export function getScreeningConfigResolution(workspaceRoot = getWorkspaceRoot()) {
+  const configPath = resolveScreeningConfigPath(workspaceRoot);
+  const exists = fs.existsSync(configPath);
+  const parsed = exists ? readJsonFile(configPath, null) : null;
+  const validation = validateScreeningConfig(parsed);
+  return {
+    configPath,
+    exists,
+    writableDir: path.dirname(configPath),
+    parsed,
+    validation
+  };
+}
+
+export function readScreeningConfig(workspaceRoot = getWorkspaceRoot()) {
+  const resolution = getScreeningConfigResolution(workspaceRoot);
+  if (!resolution.exists) {
+    return {
+      ok: false,
+      error: {
+        code: "SCREENING_CONFIG_MISSING",
+        message: `screening-config.json 不存在，请在 ${resolution.configPath} 填写真实 baseUrl/apiKey/model。`
+      },
+      ...resolution
+    };
+  }
+  if (!resolution.validation.ok) {
+    return {
+      ok: false,
+      error: {
+        code: "SCREENING_CONFIG_INVALID",
+        message: `${resolution.validation.message} (path: ${resolution.configPath})`
+      },
+      ...resolution
+    };
+  }
+  return {
+    ok: true,
+    config: {
+      baseUrl: normalizeText(resolution.parsed.baseUrl).replace(/\/+$/, ""),
+      apiKey: normalizeText(resolution.parsed.apiKey),
+      model: normalizeText(resolution.parsed.model),
+      debugPort: parsePositiveInteger(
+        process.env[ENV_DEBUG_PORT] || resolution.parsed.debugPort,
+        DEFAULT_DEBUG_PORT
+      ),
+      reasoningEffort: normalizeText(
+        resolution.parsed.reasoningEffort
+        || resolution.parsed.reasoning_effort
+        || resolution.parsed.llmThinkingLevel
+        || resolution.parsed.thinkingLevel
+      ) || null,
+      llmTimeoutMs: parsePositiveInteger(resolution.parsed.llmTimeoutMs, 120000),
+      llmMaxRetries: parsePositiveInteger(resolution.parsed.llmMaxRetries, 2),
+      llmSchemaMaxRetries: parsePositiveInteger(resolution.parsed.llmSchemaMaxRetries, 1)
+    },
+    ...resolution
+  };
+}
+
+export function createScreeningConfigTemplate() {
+  return {
+    baseUrl: "https://your-llm-endpoint.example.com/v1",
+    apiKey: "replace-with-real-api-key",
+    model: "your-model-name",
+    debugPort: DEFAULT_DEBUG_PORT,
+    reasoningEffort: "medium",
+    llmTimeoutMs: 120000,
+    llmMaxRetries: 2
+  };
+}
+
+export function writeScreeningConfigTemplate(workspaceRoot = getWorkspaceRoot(), {
+  overwrite = false
+} = {}) {
+  const resolution = getScreeningConfigResolution(workspaceRoot);
+  if (resolution.exists && !overwrite) {
+    return {
+      ok: true,
+      changed: false,
+      path: resolution.configPath,
+      message: "screening-config.json already exists"
+    };
+  }
+  writeJsonFile(resolution.configPath, createScreeningConfigTemplate());
+  return {
+    ok: true,
+    changed: true,
+    path: resolution.configPath,
+    message: "screening-config.json template written"
+  };
+}
+
+export function getResearchDocPaths(workspaceRoot = getWorkspaceRoot()) {
+  const root = path.resolve(workspaceRoot);
+  return Object.fromEntries(
+    Object.entries(RESEARCH_FILES).map(([key, relativePath]) => [key, path.join(root, relativePath)])
+  );
+}

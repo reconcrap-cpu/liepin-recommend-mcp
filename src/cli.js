@@ -1,0 +1,780 @@
+import { spawn } from "node:child_process";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+import {
+  DEFAULT_CHAT_SAMPLE_LIMIT,
+  DEFAULT_DEBUG_PORT,
+  DEFAULT_RECOMMEND_SAMPLE_LIMIT,
+  DEFAULT_RECOMMEND_STEP_DELAY_MS,
+  DEFAULT_TARGET_SURVEY_PER_PASS,
+  RUN_KINDS,
+  RUN_WORKFLOWS
+} from "./constants.js";
+import { ensureRuntimeLayout, getWorkspaceRoot, readScreeningConfig } from "./config.js";
+import { runDoctor } from "./doctor.js";
+import { probeResumeAcquisitionMatrix } from "./liepin/acquisition-matrix.js";
+import { executeChatAction, summarizeChatActionResult } from "./liepin/chat-action.js";
+import {
+  buildMockChatScreeningProvider,
+  runChatDryRunScreening,
+  summarizeChatDryRunScreening
+} from "./liepin/chat-dry-run-screening.js";
+import {
+  executeRecommendAction,
+  summarizeRecommendActionResult
+} from "./liepin/recommend-action.js";
+import {
+  runRecommendChatChain,
+  summarizeRecommendChatChain
+} from "./liepin/recommend-chat-chain.js";
+import { collectChatConversationStates, sampleChatResumeDetailResumes } from "./liepin/chat-sampler.js";
+import { collectChatScreenInputs } from "./liepin/chat-screen-input.js";
+import { summarizeChatScreeningPolicy } from "./liepin/chat-state-policy.js";
+import { validateSurveyCvParsing } from "./liepin/cv-parser.js";
+import { auditSurveyPayloadCoverage } from "./liepin/cv-payload.js";
+import { runChromeDiscovery } from "./liepin/discovery.js";
+import {
+  auditChatInfiniteScroll,
+  auditRecommendInfiniteScroll,
+  summarizeInfiniteScrollAudit
+} from "./liepin/infinite-scroll.js";
+import {
+  discoverRecommendFilters,
+  summarizeRecommendFilterDiscovery
+} from "./liepin/recommend-filter-discovery.js";
+import {
+  buildRecommendFilterPlan,
+  executeRecommendFilters,
+  summarizeRecommendFilterExecution
+} from "./liepin/recommend-filter-executor.js";
+import {
+  buildMockRecommendScreeningProvider,
+  runRecommendDryRunScreening,
+  summarizeRecommendDryRunScreening
+} from "./liepin/recommend-dry-run-screening.js";
+import { runProviderCheck } from "./provider-check.js";
+import {
+  runRecommendTraversalAudit,
+  summarizeRecommendTraversal
+} from "./liepin/recommend-traversal.js";
+import { runCvStructureSurvey } from "./liepin/cv-survey.js";
+import { sampleRecommendDetailedResumes } from "./liepin/recommend-sampler.js";
+import {
+  buildRunStatusPayload,
+  clearPauseRequest,
+  createRunSnapshot,
+  isRunTerminal,
+  listRuns,
+  readRunState,
+  requestCancel,
+  requestPause,
+  summarizeRun
+} from "./run-state.js";
+import { normalizeText, parsePositiveInteger, readJsonFile } from "./utils.js";
+
+export async function runCli(argv = process.argv.slice(2)) {
+  ensureRuntimeLayout(getWorkspaceRoot());
+  const command = argv[0];
+  const subcommand = argv[1];
+  const flags = parseFlags(argv.slice(2));
+  const rootFlags = parseFlags(argv.slice(1));
+
+  if (!command || command === "help" || command === "--help") {
+    process.stdout.write(`${buildHelp()}\n`);
+    return;
+  }
+
+  if (command === "doctor") {
+    const result = await runDoctor({
+      workspaceRoot: getWorkspaceRoot(),
+      port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], DEFAULT_DEBUG_PORT),
+      fix: Boolean(rootFlags.fix),
+      providerCheck: Boolean(rootFlags["provider-check"] || rootFlags.providerCheck)
+    });
+    printJson(result);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (command === "research") {
+    await runResearchCommand(subcommand, flags);
+    return;
+  }
+
+  if (command === "provider") {
+    await runProviderCommand(subcommand, flags);
+    return;
+  }
+
+  if (command === "runs") {
+    await runRunCommand(subcommand, flags);
+    return;
+  }
+
+  if (["recommend", "chat", "recommend-chat"].includes(command) && subcommand === "start") {
+    const input = parseStartInputFlags(command, flags);
+    assertCliSideEffectApproval({
+      needsChatAction: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
+      needsRequestResume: Boolean(input.execute_request_resume),
+      allowChatAction: Boolean(input.allow_chat_action),
+      allowRequestResume: Boolean(input.allow_request_resume)
+    });
+    const snapshot = createRunSnapshot({
+      workspaceRoot: getWorkspaceRoot(),
+      kind: command,
+      mode: "async_workflow",
+      phase: "P28",
+      input
+    });
+    const worker = spawnWorkerProcess({
+      workspaceRoot: getWorkspaceRoot(),
+      runId: snapshot.run_id
+    });
+    printJson({
+      status: "ACCEPTED",
+      run_id: snapshot.run_id,
+      pid: worker.pid,
+      state: snapshot.state,
+      workflow: input.workflow,
+      note: "已创建异步 run；使用 runs status/list 查看进度。"
+    });
+    return;
+  }
+
+  throw new Error(`Unknown command: ${argv.join(" ")}`);
+}
+
+async function runProviderCommand(subcommand, flags) {
+  if (subcommand === "check") {
+    const result = await runProviderCheck({
+      workspaceRoot: getWorkspaceRoot(),
+      mode: normalizeText(flags.mode) || "both"
+    });
+    printJson(result);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+  throw new Error(`Unknown provider command: ${subcommand || ""}`);
+}
+
+async function runResearchCommand(subcommand, flags) {
+  const port = parsePositiveInteger(flags.debugPort || flags["debug-port"], DEFAULT_DEBUG_PORT);
+  if (subcommand === "discover") {
+    printJson(await runChromeDiscovery({ port }));
+    return;
+  }
+  if (subcommand === "recommend-sample") {
+    const samples = await sampleRecommendDetailedResumes({ port }, {
+      limit: parsePositiveInteger(flags.limit, DEFAULT_RECOMMEND_SAMPLE_LIMIT)
+    });
+    printJson({ ok: true, sample_count: samples.length, samples });
+    return;
+  }
+  if (subcommand === "recommend-filter-discovery") {
+    const result = await discoverRecommendFilters({ port }, {
+      verify: flags.verify !== "false"
+    });
+    printJson({ ok: result.passed, summary: summarizeRecommendFilterDiscovery(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "recommend-filter-execute") {
+    const plan = buildRecommendFilterPlan({
+      preset: normalizeText(flags.preset),
+      graduationYear: normalizeText(flags["graduation-year"] || flags.graduationYear),
+      education: normalizeText(flags.education),
+      salaryRange: normalizeText(flags["salary-range"] || flags.salaryRange),
+      ageMin: normalizeText(flags["age-min"] || flags.ageMin),
+      ageMax: normalizeText(flags["age-max"] || flags.ageMax),
+      schoolTier: normalizeText(flags["school-tier"] || flags.schoolTier),
+      jobStatus: normalizeText(flags["job-status"] || flags.jobStatus)
+    });
+    const result = await executeRecommendFilters({ port }, {
+      plan,
+      restore: flags.restore !== "false",
+      clearOnly: Boolean(flags.clear)
+    });
+    printJson({ ok: result.passed, summary: summarizeRecommendFilterExecution(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "recommend-scroll-audit") {
+    const result = await auditRecommendInfiniteScroll({ port }, {
+      maxPasses: parsePositiveInteger(flags["max-passes"] || flags.maxPasses, 80),
+      idlePasses: parsePositiveInteger(flags["idle-passes"] || flags.idlePasses, 3),
+      delayMs: parsePositiveInteger(flags["delay-ms"] || flags.delayMs, 900),
+      probeDelayMs: parsePositiveInteger(flags["probe-delay-ms"] || flags.probeDelayMs, 1200),
+      bottomSettleDelayMs: parsePositiveInteger(flags["bottom-settle-delay-ms"] || flags.bottomSettleDelayMs, 4000),
+      terminalSignalGracePasses: parsePositiveInteger(flags["terminal-signal-grace-passes"] || flags.terminalSignalGracePasses, 3),
+      terminalSignalRequired: parseOptionalBoolean(flags["terminal-signal"] || flags.terminalSignal, true),
+      scrollViewportMultiplier: parsePositiveNumber(flags["scroll-pages"] || flags.scrollPages, 4)
+    });
+    printJson({ ok: result.passed, summary: summarizeInfiniteScrollAudit(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "recommend-traversal-audit") {
+    const result = await runRecommendTraversalAudit({ port }, {
+      steps: parsePositiveInteger(flags.steps, 10),
+      traverseTabLabel: normalizeText(flags.tab) || "推荐",
+      startIndex: parseOptionalNonNegativeInteger(flags["start-index"] || flags.startIndex) || 0,
+      stepDelayMs: parsePositiveInteger(flags["step-delay-ms"] || flags.stepDelayMs, DEFAULT_RECOMMEND_STEP_DELAY_MS)
+    });
+    printJson({ ok: result.passed, summary: summarizeRecommendTraversal(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "recommend-dry-run-screening") {
+    const llm = resolveRecommendDryRunLlm(flags);
+    const result = await runRecommendDryRunScreening({ port }, {
+      candidateLimit: parsePositiveInteger(flags["candidate-limit"] || flags.candidateLimit, 20),
+      tabLabel: normalizeText(flags.tab) || "推荐",
+      startIndex: parseOptionalNonNegativeInteger(flags["start-index"] || flags.startIndex) || 0,
+      stepDelayMs: parsePositiveInteger(flags["step-delay-ms"] || flags.stepDelayMs, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      maxPayloadChars: parsePositiveInteger(flags.maxChars || flags["max-chars"], null),
+      config: llm.config,
+      provider: llm.provider
+    });
+    printJson({ ok: result.passed, summary: summarizeRecommendDryRunScreening(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "recommend-action") {
+    const action = normalizeText(flags.action) || "none";
+    assertCliSideEffectApproval({
+      needsChatAction: action === "chat",
+      allowChatAction: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, false)
+    });
+    const result = await executeRecommendAction({ port }, {
+      action,
+      tabLabel: normalizeText(flags.tab) || "推荐",
+      startIndex: parseOptionalNonNegativeInteger(flags["start-index"] || flags.startIndex) || 0,
+      stepDelayMs: parsePositiveInteger(flags["step-delay-ms"] || flags.stepDelayMs, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      returnToRecommend: parseOptionalBoolean(flags["return-to-recommend"] || flags.returnToRecommend, true)
+    });
+    printJson({ ok: result.ok, summary: summarizeRecommendActionResult(result), result });
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "recommend-chat-chain") {
+    const executeRequestResume = parseOptionalBoolean(flags["execute-request-resume"] || flags.executeRequestResume, false);
+    assertCliSideEffectApproval({
+      needsChatAction: true,
+      needsRequestResume: executeRequestResume,
+      allowChatAction: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, false),
+      allowRequestResume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
+    });
+    const llm = resolveRecommendChatChainLlm(flags);
+    const result = await runRecommendChatChain({ port }, {
+      candidateLimit: parsePositiveInteger(flags["candidate-limit"] || flags.candidateLimit, 5),
+      scanLimit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+      tabLabel: normalizeText(flags.tab) || "推荐",
+      startIndex: parseOptionalNonNegativeInteger(flags["start-index"] || flags.startIndex) || 0,
+      stepDelayMs: parsePositiveInteger(flags["step-delay-ms"] || flags.stepDelayMs, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      chatEntryTimeoutMs: parsePositiveInteger(flags["chat-entry-timeout-ms"] || flags.chatEntryTimeoutMs, 30000),
+      maxPayloadChars: parsePositiveInteger(flags.maxChars || flags["max-chars"], null),
+      executeRequestResume,
+      config: llm.config,
+      recommendProvider: llm.recommendProvider,
+      chatProvider: llm.chatProvider
+    });
+    printJson({ ok: result.passed, summary: summarizeRecommendChatChain(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "chat-scroll-audit") {
+    const result = await auditChatInfiniteScroll({ port }, {
+      conversationFilterLabel: normalizeFilterFlag(flags.filter) || "有简历",
+      maxPasses: parsePositiveInteger(flags["max-passes"] || flags.maxPasses, 80),
+      idlePasses: parsePositiveInteger(flags["idle-passes"] || flags.idlePasses, 3),
+      delayMs: parsePositiveInteger(flags["delay-ms"] || flags.delayMs, 900),
+      probeDelayMs: parsePositiveInteger(flags["probe-delay-ms"] || flags.probeDelayMs, 1200),
+      bottomSettleDelayMs: parsePositiveInteger(flags["bottom-settle-delay-ms"] || flags.bottomSettleDelayMs, 2500),
+      terminalSignalGracePasses: parsePositiveInteger(flags["terminal-signal-grace-passes"] || flags.terminalSignalGracePasses, 2),
+      terminalSignalRequired: parseOptionalBoolean(flags["terminal-signal"] || flags.terminalSignal, false),
+      scrollViewportMultiplier: parsePositiveNumber(flags["scroll-pages"] || flags.scrollPages, 0.85)
+    });
+    printJson({ ok: result.passed, summary: summarizeInfiniteScrollAudit(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "acquisition-probe") {
+    const matrix = await probeResumeAcquisitionMatrix({ port });
+    printJson({ ok: true, matrix });
+    return;
+  }
+  if (subcommand === "chat-states") {
+    const states = await collectChatConversationStates({ port }, {
+      rowLimit: parsePositiveInteger(flags.limit, 20),
+      conversationFilterLabel: normalizeFilterFlag(flags.filter)
+    });
+    printJson({ ok: true, row_count: states.length, states });
+    return;
+  }
+  if (subcommand === "chat-sample") {
+    const samples = await sampleChatResumeDetailResumes({ port }, {
+      limit: parsePositiveInteger(flags.limit, DEFAULT_CHAT_SAMPLE_LIMIT),
+      conversationFilterLabel: normalizeFilterFlag(flags.filter)
+    });
+    printJson({ ok: true, sample_count: samples.length, samples });
+    return;
+  }
+  if (subcommand === "chat-screen-inputs") {
+    const result = await collectChatScreenInputs({ port }, {
+      limit: parsePositiveInteger(flags.limit, 10),
+      rowLimit: parsePositiveInteger(flags["row-limit"] || flags.rowLimit, 40),
+      conversationFilterLabel: normalizeFilterFlag(flags.filter) || "有简历"
+    });
+    printJson({ ok: true, result });
+    return;
+  }
+  if (subcommand === "chat-policy-audit") {
+    const states = await collectChatConversationStates({ port }, {
+      rowLimit: parsePositiveInteger(flags.limit, 20),
+      conversationFilterLabel: normalizeFilterFlag(flags.filter) || "有简历"
+    });
+    const result = summarizeChatScreeningPolicy(states);
+    printJson({ ok: result.passed, row_count: states.length, result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "chat-action") {
+    const action = normalizeText(flags.action);
+    assertCliSideEffectApproval({
+      needsRequestResume: action === "request_resume",
+      allowRequestResume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
+    });
+    const result = await executeChatAction({ port }, {
+      action,
+      rowKey: normalizeText(flags["row-key"] || flags.rowKey) || null,
+      rowIndex: parseOptionalNonNegativeInteger(flags["row-index"] || flags.rowIndex),
+      rowLimit: parsePositiveInteger(flags["row-limit"] || flags.rowLimit, 40),
+      conversationFilterLabel: normalizeFilterFlag(flags.filter) || "有简历"
+    });
+    printJson({ ok: result.ok, summary: summarizeChatActionResult(result), result });
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "chat-dry-run-screening") {
+    const llm = resolveDryRunLlm(flags);
+    const result = await runChatDryRunScreening({ port }, {
+      candidateLimit: parsePositiveInteger(flags["candidate-limit"] || flags.candidateLimit, 20),
+      rowLimit: parsePositiveInteger(flags["row-limit"] || flags.rowLimit, 40),
+      maxScrollPasses: parsePositiveInteger(flags["max-scroll-passes"] || flags.maxScrollPasses, 3),
+      conversationFilterLabel: normalizeFilterFlag(flags.filter) || "有简历",
+      config: llm.config,
+      provider: llm.provider
+    });
+    printJson({ ok: result.passed, summary: summarizeChatDryRunScreening(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "cv-survey") {
+    const survey = await runCvStructureSurvey({
+      workspaceRoot: getWorkspaceRoot(),
+      minimumSamples: parsePositiveInteger(flags.minimum, 50),
+      batchSize: parsePositiveInteger(flags.batch, 10),
+      perPassLimit: parsePositiveInteger(flags["per-pass"] || flags.perPass, DEFAULT_TARGET_SURVEY_PER_PASS),
+      maxRounds: parsePositiveInteger(flags.rounds, 4),
+      recommendSampler: async (limit) => sampleRecommendDetailedResumes({ port, tabLabel: "推荐" }, { limit }),
+      latestRecommendSampler: async (limit) => sampleRecommendDetailedResumes({ port, tabLabel: "最新" }, { limit }),
+      chatSampler: async (limit) => sampleChatResumeDetailResumes({ port }, {
+        limit,
+        conversationFilterLabel: "有简历"
+      }),
+      onProgress: buildSurveyProgressLogger(flags)
+    });
+    printJson({ ok: true, survey });
+    return;
+  }
+  if (subcommand === "parse-survey") {
+    const filePath = normalizeText(flags.file);
+    if (!filePath) {
+      throw new Error("--file is required");
+    }
+    const payload = readJsonFile(filePath, null);
+    if (!payload) {
+      throw new Error(`无法读取 survey 文件：${filePath}`);
+    }
+    printJson({ ok: true, result: validateSurveyCvParsing(payload) });
+    return;
+  }
+  if (subcommand === "audit-payload") {
+    const filePath = normalizeText(flags.file);
+    if (!filePath) {
+      throw new Error("--file is required");
+    }
+    const payload = readJsonFile(filePath, null);
+    if (!payload) {
+      throw new Error(`无法读取 survey 文件：${filePath}`);
+    }
+    printJson({
+      ok: true,
+      result: auditSurveyPayloadCoverage(payload, {
+        sampleLimit: parsePositiveInteger(flags.limit, 10),
+        maxPayloadChars: parsePositiveInteger(flags.maxChars || flags["max-chars"], null)
+      })
+    });
+    return;
+  }
+  throw new Error(`Unknown research command: ${subcommand || ""}`);
+}
+
+function resolveDryRunLlm(flags) {
+  if (parseOptionalBoolean(flags["mock-llm"] ?? flags.mockLlm, false)) {
+    return {
+      config: {
+        model: normalizeText(flags["mock-model"] || flags.mockModel) || "mock-chat-dry-run"
+      },
+      provider: buildMockChatScreeningProvider({
+        decision: normalizeText(flags["mock-decision"] || flags.mockDecision) || "fail",
+        postAction: normalizeText(flags["mock-post-action"] || flags.mockPostAction) || "none",
+        reasoningText: normalizeText(flags["mock-reasoning"] || flags.mockReasoning)
+      })
+    };
+  }
+  const resolution = readScreeningConfig(getWorkspaceRoot());
+  if (!resolution.ok) {
+    throw new Error(`${resolution.error.message} 如需无密钥验收 dry-run，请显式传入 --mock-llm。`);
+  }
+  return {
+    config: resolution.config,
+    provider: null
+  };
+}
+
+function resolveRecommendDryRunLlm(flags) {
+  if (parseOptionalBoolean(flags["mock-llm"] ?? flags.mockLlm, false)) {
+    return {
+      config: {
+        model: normalizeText(flags["mock-model"] || flags.mockModel) || "mock-recommend-dry-run"
+      },
+      provider: buildMockRecommendScreeningProvider({
+        decision: normalizeText(flags["mock-decision"] || flags.mockDecision) || "fail",
+        postAction: normalizeText(flags["mock-post-action"] || flags.mockPostAction) || "none",
+        reasoningText: normalizeText(flags["mock-reasoning"] || flags.mockReasoning)
+      })
+    };
+  }
+  const resolution = readScreeningConfig(getWorkspaceRoot());
+  if (!resolution.ok) {
+    throw new Error(`${resolution.error.message} 如需无密钥验收 dry-run，请显式传入 --mock-llm。`);
+  }
+  return {
+    config: resolution.config,
+    provider: null
+  };
+}
+
+function resolveRecommendChatChainLlm(flags) {
+  if (parseOptionalBoolean(flags["mock-llm"] ?? flags.mockLlm, false)) {
+    return {
+      config: {
+        model: normalizeText(flags["mock-model"] || flags.mockModel) || "mock-recommend-chat-chain"
+      },
+      recommendProvider: buildMockRecommendScreeningProvider({
+        decision: normalizeText(
+          flags["mock-recommend-decision"]
+          || flags.mockRecommendDecision
+          || flags["mock-decision"]
+          || flags.mockDecision
+        ) || "pass",
+        postAction: normalizeText(
+          flags["mock-recommend-post-action"]
+          || flags.mockRecommendPostAction
+          || flags["mock-post-action"]
+          || flags.mockPostAction
+        ) || "chat",
+        reasoningText: normalizeText(flags["mock-reasoning"] || flags.mockReasoning)
+      }),
+      chatProvider: buildMockChatScreeningProvider({
+        decision: normalizeText(
+          flags["mock-chat-decision"]
+          || flags.mockChatDecision
+          || flags["mock-decision"]
+          || flags.mockDecision
+        ) || "pass",
+        postAction: normalizeText(
+          flags["mock-chat-post-action"]
+          || flags.mockChatPostAction
+        ) || "request_resume",
+        reasoningText: normalizeText(flags["mock-reasoning"] || flags.mockReasoning)
+      })
+    };
+  }
+  const resolution = readScreeningConfig(getWorkspaceRoot());
+  if (!resolution.ok) {
+    throw new Error(`${resolution.error.message} 如需无密钥验收 P22 串联，请显式传入 --mock-llm。`);
+  }
+  return {
+    config: resolution.config,
+    recommendProvider: null,
+    chatProvider: null
+  };
+}
+
+async function runRunCommand(subcommand, flags) {
+  const workspaceRoot = getWorkspaceRoot();
+  const runId = normalizeText(flags.runId || flags["run-id"]);
+  if (subcommand === "list") {
+    const full = Boolean(flags.full);
+    printJson({ runs: listRuns(workspaceRoot).map((run) => (full ? run : summarizeRun(run))) });
+    return;
+  }
+  if (!runId) {
+    throw new Error("--run-id is required");
+  }
+  if (subcommand === "status") {
+    const run = readRunState(workspaceRoot, runId);
+    printJson({ run: buildRunStatusPayload(run, { full: Boolean(flags.full) }) });
+    if (!run) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "pause") {
+    const run = requestPause(workspaceRoot, runId);
+    printJson({ run });
+    if (!run) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "cancel") {
+    const run = requestCancel(workspaceRoot, runId);
+    printJson({ run });
+    if (!run) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "resume") {
+    const current = readRunState(workspaceRoot, runId);
+    if (current && isRunTerminal(current)) {
+      printJson({
+        run: current,
+        error: {
+          code: "RUN_TERMINAL",
+          message: `run_id=${runId} 已结束，不能 resume。`
+        }
+      });
+      process.exitCode = 1;
+      return;
+    }
+    const run = clearPauseRequest(workspaceRoot, runId);
+    const worker = run
+      ? spawnWorkerProcess({ workspaceRoot, runId })
+      : null;
+    printJson({
+      run,
+      pid: worker?.pid || null,
+      note: "run resume 已重新进入后台 worker。"
+    });
+    if (!run) {
+      process.exitCode = 1;
+      return;
+    }
+    return;
+  }
+  throw new Error(`Unknown runs subcommand: ${subcommand || ""}`);
+}
+
+function parseFlags(argv) {
+  const flags = {};
+  let index = 0;
+  while (index < argv.length) {
+    const token = argv[index];
+    if (!token.startsWith("--")) {
+      index += 1;
+      continue;
+    }
+    const key = token.slice(2);
+    const next = argv[index + 1];
+    if (!next || next.startsWith("--")) {
+      flags[key] = true;
+      index += 1;
+      continue;
+    }
+    flags[key] = next;
+    index += 2;
+  }
+  return flags;
+}
+
+function parseStartInputFlags(kind, flags) {
+  const base = {
+    debug_port: parsePositiveInteger(flags.debugPort || flags["debug-port"], DEFAULT_DEBUG_PORT),
+    sample_limit: parsePositiveInteger(flags.limit || flags.sampleLimit, DEFAULT_RECOMMEND_SAMPLE_LIMIT),
+    candidate_limit: parsePositiveInteger(flags["candidate-limit"] || flags.candidateLimit, null),
+    tab: normalizeText(flags.tab) || "推荐",
+    filter: normalizeFilterFlag(flags.filter) || "有简历",
+    start_index: parseOptionalNonNegativeInteger(flags["start-index"] || flags.startIndex) || 0,
+    step_delay_ms: parsePositiveInteger(flags["step-delay-ms"] || flags.stepDelayMs, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+    max_chars: parsePositiveInteger(flags.maxChars || flags["max-chars"], null),
+    mock_llm: parseOptionalBoolean(flags["mock-llm"] ?? flags.mockLlm, false),
+    mock_model: normalizeText(flags["mock-model"] || flags.mockModel),
+    mock_decision: normalizeText(flags["mock-decision"] || flags.mockDecision),
+    mock_post_action: normalizeText(flags["mock-post-action"] || flags.mockPostAction),
+    mock_reasoning: normalizeText(flags["mock-reasoning"] || flags.mockReasoning),
+    allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, false),
+    allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
+  };
+
+  if (kind === RUN_KINDS.RECOMMEND) {
+    return {
+      ...base,
+      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+      candidate_limit: base.candidate_limit || 20,
+      mock_decision: base.mock_decision || "fail",
+      mock_post_action: base.mock_post_action || "none"
+    };
+  }
+
+  if (kind === RUN_KINDS.CHAT) {
+    return {
+      ...base,
+      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING,
+      candidate_limit: base.candidate_limit || 20,
+      row_limit: parsePositiveInteger(flags["row-limit"] || flags.rowLimit, 40),
+      max_scroll_passes: parsePositiveInteger(flags["max-scroll-passes"] || flags.maxScrollPasses, 3),
+      mock_decision: base.mock_decision || "fail",
+      mock_post_action: base.mock_post_action || "none"
+    };
+  }
+
+  return {
+    ...base,
+    workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
+    candidate_limit: base.candidate_limit || 5,
+    scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+    chat_entry_timeout_ms: parsePositiveInteger(flags["chat-entry-timeout-ms"] || flags.chatEntryTimeoutMs, 30000),
+    execute_request_resume: parseOptionalBoolean(flags["execute-request-resume"] || flags.executeRequestResume, false),
+    mock_recommend_decision: normalizeText(flags["mock-recommend-decision"] || flags.mockRecommendDecision),
+    mock_recommend_post_action: normalizeText(flags["mock-recommend-post-action"] || flags.mockRecommendPostAction),
+    mock_chat_decision: normalizeText(flags["mock-chat-decision"] || flags.mockChatDecision),
+    mock_chat_post_action: normalizeText(flags["mock-chat-post-action"] || flags.mockChatPostAction)
+  };
+}
+
+function printJson(value) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function normalizeFilterFlag(value) {
+  const normalized = normalizeText(value);
+  return normalized || null;
+}
+
+function parseOptionalNonNegativeInteger(value) {
+  if (value === undefined || value === null || value === true) return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function parseOptionalBoolean(value, fallback) {
+  if (value === undefined || value === null) return fallback;
+  if (value === true) return true;
+  const normalized = normalizeText(value).toLowerCase();
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  return fallback;
+}
+
+function parsePositiveNumber(value, fallback = null) {
+  const parsed = Number.parseFloat(String(value ?? ""));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function assertCliSideEffectApproval({
+  needsChatAction = false,
+  needsRequestResume = false,
+  allowChatAction = false,
+  allowRequestResume = false
+} = {}) {
+  if (needsChatAction && !allowChatAction) {
+    throw new Error("该命令会真实点击推荐沟通；请显式传入 --allow-chat-action。");
+  }
+  if (needsRequestResume && !allowRequestResume) {
+    throw new Error("该命令会真实索要简历；请显式传入 --allow-request-resume。");
+  }
+}
+
+function buildSurveyProgressLogger(flags) {
+  if (flags.progress === "false" || flags["no-progress"]) return null;
+  return (event) => {
+    const parts = [
+      `[cv-survey] ${event.phase || event.status}`,
+      `samples=${event.sampledCount}`,
+      `structures=${event.uniqueStructureCount}`,
+      `minimum=${event.meetsMinimumSamples ? "met" : "pending"}`,
+      `stable=${event.stableAfterFinalBatch ? "yes" : "no"}`,
+      `stop=${event.stopReason}`,
+      `file=${event.outputPath}`
+    ];
+    process.stderr.write(`${parts.join(" ")}\n`);
+  };
+}
+
+function buildHelp() {
+  return [
+    "liepin-recommend-mcp commands",
+    "",
+    "  doctor [--debug-port 9222] [--fix] [--provider-check]",
+    "  provider check [--mode both|recommend|chat]",
+    "  recommend start [--debug-port 9222] [--candidate-limit 20] [--mock-llm]",
+    "  chat start [--debug-port 9222] [--candidate-limit 20] [--filter 有简历] [--mock-llm]",
+    "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--mock-llm] --allow-chat-action [--allow-request-resume]",
+    "  runs list [--full]",
+    "  runs status --run-id <id> [--full]",
+    "  runs pause --run-id <id>",
+    "  runs resume --run-id <id>",
+    "  runs cancel --run-id <id>",
+    "",
+    "Research helpers",
+    "",
+    "  research discover --debug-port 9222",
+    "  research acquisition-probe --debug-port 9222",
+    "  research recommend-sample --limit 5",
+    "  research recommend-filter-discovery --debug-port 9222",
+    "  research recommend-filter-execute --preset p17 [--restore false]",
+    "  research recommend-scroll-audit [--max-passes 80] [--idle-passes 3] [--scroll-pages 4] [--bottom-settle-delay-ms 4000]",
+    "  research recommend-traversal-audit [--steps 10] [--tab 推荐] [--step-delay-ms 3500]",
+    "  research recommend-dry-run-screening [--candidate-limit 20] [--tab 推荐] [--mock-llm]",
+    "  research recommend-action --action none|chat [--start-index 0] [--tab 推荐] [--allow-chat-action]",
+    "  research recommend-chat-chain [--candidate-limit 5] [--scan-limit 10] [--chat-entry-timeout-ms 30000] [--mock-llm] --allow-chat-action [--allow-request-resume]",
+    "  research chat-scroll-audit [--filter 有简历] [--max-passes 80] [--idle-passes 3]",
+    "  research chat-states --limit 20 [--filter 有简历]",
+    "  research chat-sample --limit 5 [--filter 有简历]",
+    "  research chat-screen-inputs --limit 10 [--filter 有简历]",
+    "  research chat-policy-audit --limit 20 [--filter 有简历]",
+    "  research chat-action --action none|request_resume [--row-key <key>] [--row-index <n>] [--allow-request-resume]",
+    "  research cv-survey --minimum 50 --batch 10 [--per-pass 10] [--rounds 4] [--no-progress]",
+    "  research parse-survey --file <cv-structure-survey.json>",
+    "  research audit-payload --file <cv-structure-survey.json> [--limit 10]"
+  ].join("\n");
+}
+
+function spawnWorkerProcess({ workspaceRoot, runId }) {
+  const child = spawn(
+    process.execPath,
+    [
+      path.join(workspaceRoot, "src", "worker.js"),
+      "--run-id",
+      runId,
+      "--workspace-root",
+      workspaceRoot
+    ],
+    {
+      cwd: workspaceRoot,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    }
+  );
+  child.unref();
+  return child;
+}
+
+const currentFilePath = fileURLToPath(import.meta.url);
+if (process.argv[1] && currentFilePath === process.argv[1]) {
+  runCli(process.argv.slice(2)).catch((error) => {
+    process.stderr.write(`${error?.stack || error?.message || String(error)}\n`);
+    process.exitCode = 1;
+  });
+}

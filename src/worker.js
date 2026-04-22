@@ -1,0 +1,335 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  DEFAULT_RECOMMEND_STEP_DELAY_MS,
+  RUN_KINDS,
+  RUN_WORKFLOWS
+} from "./constants.js";
+import { getWorkspaceRoot, readScreeningConfig } from "./config.js";
+import {
+  appendRunEvent,
+  markRunCanceled,
+  markRunCompleted,
+  markRunFailed,
+  markRunPaused,
+  markRunRunning,
+  readRunState,
+  isRunTerminal,
+  updateRunProgress
+} from "./run-state.js";
+import { sampleChatResumeDetailResumes } from "./liepin/chat-sampler.js";
+import { runCvStructureSurvey } from "./liepin/cv-survey.js";
+import { sampleRecommendDetailedResumes } from "./liepin/recommend-sampler.js";
+import {
+  buildMockChatScreeningProvider,
+  runChatDryRunScreening,
+  summarizeChatDryRunScreening
+} from "./liepin/chat-dry-run-screening.js";
+import {
+  buildMockRecommendScreeningProvider,
+  runRecommendDryRunScreening,
+  summarizeRecommendDryRunScreening
+} from "./liepin/recommend-dry-run-screening.js";
+import {
+  runRecommendChatChain,
+  summarizeRecommendChatChain
+} from "./liepin/recommend-chat-chain.js";
+import { normalizeText, parsePositiveInteger } from "./utils.js";
+
+export async function runWorker({
+  workspaceRoot = getWorkspaceRoot(),
+  runId,
+  executors = createDefaultExecutors()
+}) {
+  const snapshot = readRunState(workspaceRoot, runId);
+  if (!snapshot) throw new Error(`Run not found: ${runId}`);
+  if (isRunTerminal(snapshot)) {
+    appendRunEvent(snapshot, "worker_skipped_terminal_run", {
+      state: snapshot.state
+    });
+    return;
+  }
+  if (snapshot.control?.cancel_requested) {
+    markRunCanceled(workspaceRoot, runId, { reason: "cancelled_before_start" });
+    return;
+  }
+
+  markRunRunning(workspaceRoot, runId);
+  appendRunEvent(readRunState(workspaceRoot, runId), "worker_started", {
+    pid: process.pid
+  });
+
+  try {
+    if (snapshot.control?.pause_requested) {
+      markRunPaused(workspaceRoot, runId, { stage: "before_browser_work" });
+      return;
+    }
+
+    const result = await executeWorkflow({
+      workspaceRoot,
+      snapshot,
+      executors,
+      onProgress: (event) => {
+        updateRunProgress(workspaceRoot, runId, event);
+      }
+    });
+    markRunCompleted(workspaceRoot, runId, result);
+  } catch (error) {
+    markRunFailed(workspaceRoot, runId, {
+      code: error?.code || "WORKER_UNEXPECTED_ERROR",
+      message: error?.message || "Unexpected worker error"
+    });
+  }
+}
+
+export async function executeWorkflow({
+  workspaceRoot,
+  snapshot,
+  executors = createDefaultExecutors(),
+  onProgress = null
+}) {
+  const input = snapshot.input || {};
+  const workflow = normalizeText(input.workflow) || legacyWorkflowForKind(snapshot.kind);
+  const port = parsePositiveInteger(input.debug_port, 9222);
+  appendRunEvent(snapshot, "workflow_selected", {
+    workflow
+  });
+  assertSideEffectApproval(workflow, input);
+
+  if (workflow === RUN_WORKFLOWS.RECOMMEND_SAMPLE) {
+    const samples = await executors.recommendSample({ port }, {
+      limit: parsePositiveInteger(input.sample_limit, 5)
+    });
+    return {
+      workflow,
+      summary: {
+        sampled_count: samples.length,
+        source: "recommend_modal"
+      },
+      samples
+    };
+  }
+
+  if (workflow === RUN_WORKFLOWS.CHAT_SAMPLE) {
+    const samples = await executors.chatSample({ port }, {
+      limit: parsePositiveInteger(input.sample_limit, 5),
+      conversationFilterLabel: normalizeText(input.filter) || null
+    });
+    return {
+      workflow,
+      summary: {
+        sampled_count: samples.length,
+        source: "chat_resume_detail"
+      },
+      samples
+    };
+  }
+
+  if (workflow === RUN_WORKFLOWS.CV_SURVEY) {
+    const result = await executors.cvSurvey({
+      workspaceRoot,
+      minimumSamples: parsePositiveInteger(input.minimum_samples, 50),
+      batchSize: parsePositiveInteger(input.batch_size, 10),
+      recommendSampler: async (limit) => executors.recommendSample({ port, tabLabel: "推荐" }, { limit }),
+      latestRecommendSampler: async (limit) => executors.recommendSample({ port, tabLabel: "最新" }, { limit }),
+      chatSampler: async (limit) => executors.chatSample({ port }, { limit })
+    });
+    return {
+      workflow,
+      summary: {
+        sampled_count: result.sampledCount || result.samples?.length || 0,
+        unique_structure_count: result.uniqueStructureCount || result.uniqueStructures?.length || 0,
+        output_path: result.outputPath || null
+      },
+      result
+    };
+  }
+
+  if (workflow === RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING) {
+    const llm = resolveRecommendDryRunLlm(workspaceRoot, input);
+    const result = await executors.recommendDryRun({ port }, {
+      candidateLimit: parsePositiveInteger(input.candidate_limit, parsePositiveInteger(input.sample_limit, 20)),
+      tabLabel: normalizeText(input.tab) || "推荐",
+      startIndex: parseNonNegativeInteger(input.start_index, 0),
+      stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      config: llm.config,
+      provider: llm.provider
+    });
+    return {
+      workflow,
+      summary: summarizeRecommendDryRunScreening(result),
+      result
+    };
+  }
+
+  if (workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING) {
+    const llm = resolveChatDryRunLlm(workspaceRoot, input);
+    const result = await executors.chatDryRun({ port }, {
+      candidateLimit: parsePositiveInteger(input.candidate_limit, parsePositiveInteger(input.sample_limit, 20)),
+      rowLimit: parsePositiveInteger(input.row_limit, 40),
+      maxScrollPasses: parsePositiveInteger(input.max_scroll_passes, 3),
+      conversationFilterLabel: normalizeText(input.filter) || "有简历",
+      config: llm.config,
+      provider: llm.provider
+    });
+    return {
+      workflow,
+      summary: summarizeChatDryRunScreening(result),
+      result
+    };
+  }
+
+  if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN) {
+    const llm = resolveRecommendChatChainLlm(workspaceRoot, input);
+    const result = await executors.recommendChatChain({ port }, {
+      candidateLimit: parsePositiveInteger(input.candidate_limit, 5),
+      scanLimit: parsePositiveInteger(input.scan_limit, null),
+      tabLabel: normalizeText(input.tab) || "推荐",
+      startIndex: parseNonNegativeInteger(input.start_index, 0),
+      stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      chatEntryTimeoutMs: parsePositiveInteger(input.chat_entry_timeout_ms, 30000),
+      maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      executeRequestResume: Boolean(input.execute_request_resume),
+      config: llm.config,
+      recommendProvider: llm.recommendProvider,
+      chatProvider: llm.chatProvider,
+      onProgress
+    });
+    return {
+      workflow,
+      summary: summarizeRecommendChatChain(result),
+      result
+    };
+  }
+
+  throw new Error(`Unsupported run workflow: ${workflow || "(empty)"}`);
+}
+
+function assertSideEffectApproval(workflow, input = {}) {
+  if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN && !input.allow_chat_action) {
+    throw createWorkflowError(
+      "SIDE_EFFECT_APPROVAL_REQUIRED",
+      "recommend_chat_chain 会点击推荐沟通按钮；请显式传入 allow_chat_action/--allow-chat-action。"
+    );
+  }
+  if (input.execute_request_resume && !input.allow_request_resume) {
+    throw createWorkflowError(
+      "SIDE_EFFECT_APPROVAL_REQUIRED",
+      "execute_request_resume 会真实索要简历；请显式传入 allow_request_resume/--allow-request-resume。"
+    );
+  }
+}
+
+function createWorkflowError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+export function createDefaultExecutors() {
+  return {
+    recommendSample: sampleRecommendDetailedResumes,
+    chatSample: sampleChatResumeDetailResumes,
+    cvSurvey: runCvStructureSurvey,
+    recommendDryRun: runRecommendDryRunScreening,
+    chatDryRun: runChatDryRunScreening,
+    recommendChatChain: runRecommendChatChain
+  };
+}
+
+function legacyWorkflowForKind(kind) {
+  if (kind === RUN_KINDS.RECOMMEND) return RUN_WORKFLOWS.RECOMMEND_SAMPLE;
+  if (kind === RUN_KINDS.CHAT) return RUN_WORKFLOWS.CHAT_SAMPLE;
+  if (kind === RUN_KINDS.RECOMMEND_CHAT) return RUN_WORKFLOWS.CV_SURVEY;
+  return "";
+}
+
+function resolveRecommendDryRunLlm(workspaceRoot, input) {
+  if (input.mock_llm) {
+    return {
+      config: {
+        model: normalizeText(input.mock_model) || "mock-recommend-dry-run"
+      },
+      provider: buildMockRecommendScreeningProvider({
+        decision: normalizeText(input.mock_decision) || "fail",
+        postAction: normalizeText(input.mock_post_action) || "none",
+        reasoningText: normalizeText(input.mock_reasoning)
+      })
+    };
+  }
+  return resolveRequiredConfig(workspaceRoot);
+}
+
+function resolveChatDryRunLlm(workspaceRoot, input) {
+  if (input.mock_llm) {
+    return {
+      config: {
+        model: normalizeText(input.mock_model) || "mock-chat-dry-run"
+      },
+      provider: buildMockChatScreeningProvider({
+        decision: normalizeText(input.mock_decision) || "fail",
+        postAction: normalizeText(input.mock_post_action) || "none",
+        reasoningText: normalizeText(input.mock_reasoning)
+      })
+    };
+  }
+  return resolveRequiredConfig(workspaceRoot);
+}
+
+function resolveRecommendChatChainLlm(workspaceRoot, input) {
+  if (input.mock_llm) {
+    return {
+      config: {
+        model: normalizeText(input.mock_model) || "mock-recommend-chat-chain"
+      },
+      recommendProvider: buildMockRecommendScreeningProvider({
+        decision: normalizeText(input.mock_recommend_decision || input.mock_decision) || "pass",
+        postAction: normalizeText(input.mock_recommend_post_action || input.mock_post_action) || "chat",
+        reasoningText: normalizeText(input.mock_reasoning)
+      }),
+      chatProvider: buildMockChatScreeningProvider({
+        decision: normalizeText(input.mock_chat_decision || input.mock_decision) || "pass",
+        postAction: normalizeText(input.mock_chat_post_action) || "request_resume",
+        reasoningText: normalizeText(input.mock_reasoning)
+      })
+    };
+  }
+  const config = resolveRequiredConfig(workspaceRoot).config;
+  return {
+    config,
+    recommendProvider: null,
+    chatProvider: null
+  };
+}
+
+function resolveRequiredConfig(workspaceRoot) {
+  const resolution = readScreeningConfig(workspaceRoot);
+  if (!resolution.ok) {
+    throw new Error(`${resolution.error.message} 如需无密钥验收异步 dry-run，请显式传入 mock_llm/--mock-llm。`);
+  }
+  return {
+    config: resolution.config,
+    provider: null
+  };
+}
+
+function parseNonNegativeInteger(value, fallback = 0) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+const currentFilePath = fileURLToPath(import.meta.url);
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(currentFilePath)) {
+  const runId = process.argv[process.argv.indexOf("--run-id") + 1];
+  runWorker({
+    workspaceRoot: process.argv.includes("--workspace-root")
+      ? path.resolve(process.argv[process.argv.indexOf("--workspace-root") + 1])
+      : getWorkspaceRoot(),
+    runId
+  }).catch((error) => {
+    process.stderr.write(`${error?.stack || error?.message || String(error)}\n`);
+    process.exitCode = 1;
+  });
+}

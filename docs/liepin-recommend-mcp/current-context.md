@@ -1,0 +1,357 @@
+# Current Context
+
+## Last Context Refresh
+- Date: 2026-04-22
+- Current gate: `P29`
+- Last passed phase: `P28`
+
+## Phase State
+- `P00` to `P28`: `PASSED`
+- `P29+`: next phase
+
+## Immediate TODOs
+- Start `P29`: persist partial artifacts for failed/aborted long runs, and extend progress parity beyond `recommend_chat_chain`.
+- P28 real-provider CLI/MCP parity and progress observability are complete:
+  - `src/run-state.js` now persists `progress` plus `run_progress` events, and compact status/list surfaces now expose `progress`.
+  - `src/worker.js` now threads workflow progress into run-state for `recommend_chat_chain`.
+  - `src/liepin/recommend-chat-chain.js` now emits staged progress (`prepare_recommend_page`, `open_recommend_candidate`, `recommend_llm`, `wait_chat_entry`, `chat_llm`, `request_resume`, `return_to_recommend`, `candidate_completed`).
+  - same-target return-to-recommend is hardened: the first MCP real run `recommend-chat-20260422035630-wn822j` failed after `return_to_recommend` with `Inspected target navigated or closed`, so the chain now prefers reconnecting through the verified target and falls back to recommend-page recovery.
+  - real CLI run `recommend-chat-20260422035508-spsjey` completed with `phase=P28`, mid-run progress visible, and final summary `scannedCandidates=2`, `chainedCandidates=2`, `requestResumeClicks=2`, `violations=[]`.
+  - real MCP tool-path run `recommend-chat-20260422035905-ieeiqn` completed with `phase=P28`, mid-run compact `liepin_run_status` progress visible, and final summary `scannedCandidates=1`, `chainedCandidates=1`, `requestResumeClicks=1`, `violations=[]`.
+  - `events.ndjson` for `recommend-chat-20260422035905-ieeiqn` now records ordered `run_progress` stages before `run_completed`.
+  - full suite latest result: `66 tests passed`.
+- P25 real LLM provider validation is complete:
+  - copied `C:\Users\yaolin\.boss-recommend-mcp\screening-config.json` to `C:\Users\yaolin\.liepin-recommend-mcp\screening-config.json`.
+  - effective non-secret config: `baseUrl=https://coding.qunhequnhe.com/v1`, `model=gemini-3-flash`.
+  - `node src/cli.js provider check --mode both` passed with real LLM for recommend and chat synthetic inputs.
+  - real recommend dry-run `recommend-20260422025402-w5svxv` completed with `mock_llm=false`, `processedCandidates=1`, `llmCalls=1`, `actionClicks=0`, `coveragePassed=true`, `closeVerified=true`, `violations=[]`.
+  - never print or paste the apiKey from `screening-config.json`.
+- P27 real-provider recommend-chat chain is complete:
+  - smoke test with real side effects passed:
+    - `node src/cli.js research recommend-chat-chain --debug-port 9222 --candidate-limit 1 --scan-limit 5 --tab 推荐 --step-delay-ms 5500 --chat-entry-timeout-ms 45000 --allow-chat-action --execute-request-resume --allow-request-resume`
+    - result: `ok=true`, `recommendChatClicks=1`, `requestResumeClicks=1`, same candidate moved `索要简历 -> 索要中`.
+  - full async run `recommend-chat-20260422033534-wwvpyq` completed with:
+    - `phase=P27`
+    - `ok=true`
+    - `scannedCandidates=5`
+    - `chainedCandidates=5`
+    - `samePageChatEntries=5`
+    - `chatPageEntries=0`
+    - `screenableChatEntries=5`
+    - `recommendLlmCalls=5`
+    - `chatLlmCalls=5`
+    - `recommendChatClicks=5`
+    - `requestResumeClicks=5`
+    - `actionClicks=10`
+    - `violations=[]`
+  - split artifacts under `C:\Users\yaolin\.liepin-recommend-mcp\runs\recommend-chat-20260422033534-wwvpyq\` now record both recommend/chat manifests, both LLM requests, and executed request-resume decisions.
+- P27 code changes:
+  - `src/cli.js` now stamps new runs as `P27` and truly backgrounds async start/resume workers.
+  - `src/json-rpc.js` now stamps new MCP runs as `P27`.
+  - `src/liepin/recommend-action.js` now verifies the correct chat target when multiple chat tabs exist and captures richer chat-page snapshots.
+  - `src/liepin/recommend-chat-chain.js` now supports both `recommend_basic_chat_modal` and `chat_page` as real chained entry kinds.
+  - `src/liepin/chat-action.js` now accepts a specific `pageTarget`.
+  - `src/run-state.js` now prefers candidate name over generic labels in split artifacts.
+- P26 real LLM chat-page dry-run is complete:
+  - chat page was opened in Chrome `9222` and confirmed by `research discover` alongside the recommend page.
+  - sandboxed `node src/cli.js provider check --mode chat` hit restricted-network `fetch failed`; rerun with approved escalation passed with `decision=pass`, `post_action=request_resume`.
+  - first real run `chat-20260422030948-qtjn76` completed with `processedCandidates=5`, `screenableCandidates=0`, `llmCalls=0`, `actionClicks=0`.
+  - `research chat-states --limit 30 --filter 有简历` showed real `索要简历` rows deeper in the list, so the run window was expanded.
+  - final real run `chat-20260422031702-etvs87` completed with `mock_llm=false`, `processedCandidates=15`, `screenableCandidates=4`, `llmCalls=4`, `actionClicks=0`, `violations=[]`.
+  - split artifacts under `C:\Users\yaolin\.liepin-recommend-mcp\runs\chat-20260422031702-etvs87\` now preserve non-null chat `llmRequest`, row index, manifest, and `wouldPostAction=request_resume`.
+- P26 code changes:
+  - `src/cli.js` and `src/json-rpc.js` now stamp new runs as `P26`.
+  - `src/liepin/chat-dry-run-screening.js` now preserves chat row index, `llmRequest`, and `chatInputManifest` for artifact persistence.
+  - `src/run-state.js` now maps chat dry-run items into split artifacts using `rowIndex` and decision fallbacks.
+  - `src/run-state.test.js` covers the chat artifact regression.
+- P25 code changes:
+  - `src/provider-check.js` adds provider readiness checks.
+  - `src/llm-adapter.js` now has stricter enum prompts, transient HTTP retry, and bounded schema repair.
+  - CLI adds `provider check [--mode both|recommend|chat]`.
+  - `doctor --provider-check` and MCP `liepin_provider_check` are available.
+  - `--mock-llm false` no longer enables mock mode.
+  - recommend dry-run close cleanup and drift checks are more robust for live DOM changes.
+- P24 production gating / artifact UX is in place:
+  - completed workflow runs now persist split `screen-input.json`, `llm-request.json`, `decision.json`, and `coverage.json` artifacts.
+  - `runs status` / `runs list` default to compact operator payloads; pass `--full` for full run JSON.
+  - `recommend-chat start` and `research recommend-chat-chain` require `--allow-chat-action`.
+  - `--execute-request-resume` additionally requires `--allow-request-resume`.
+  - MCP start tools accept `allow_chat_action` / `allow_request_resume` and apply the same gate.
+  - worker defense-in-depth fails gated workflows with `SIDE_EFFECT_APPROVAL_REQUIRED` before executor/browser action.
+- P24 safe live evidence:
+  - async run `recommend-20260422023134-k762ox` completed `recommend_dry_run_screening` with `processedCandidates=1`, `llmCalls=1`, `actionClicks=0`, `coveragePassed=true`.
+  - generated artifact summary with `itemCount=1` and split run artifacts under `C:\Users\yaolin\.liepin-recommend-mcp\runs\recommend-20260422023134-k762ox\`.
+  - `node src/cli.js recommend-chat start --mock-llm --candidate-limit 1` was rejected with missing `--allow-chat-action`, exit code `1`.
+  - post-check `node src/cli.js research discover --debug-port 9222`: recommend target present, `riskBlocked=false`, `loginOk=true`, no risk page.
+- P23 async run / doctor surface is in place:
+  - `recommend start` -> `recommend_dry_run_screening`
+  - `chat start` -> `chat_dry_run_screening`
+  - `recommend-chat start` -> `recommend_chat_chain`
+  - MCP start tools accept workflow/mock/candidate/filter/timeout parameters.
+  - `doctor --fix` can create a missing `screening-config.json` template without overwriting existing config.
+- P23 live evidence:
+  - `node src/cli.js doctor --debug-port 9222` produced expected setup recommendations for missing screening config and unopened chat page.
+  - async run `recommend-20260422021002-wjgli9` completed `recommend_dry_run_screening` with `processedCandidates=1`, `llmCalls=1`, `actionClicks=0`, `coveragePassed=true`.
+- P22 code scaffold is in place:
+  - `src/liepin/recommend-chat-chain.js`
+  - `src/liepin/recommend-chat-chain.test.js`
+  - CLI after P24 gate: `node src/cli.js research recommend-chat-chain --debug-port 9222 --candidate-limit 5 --scan-limit 10 --tab 推荐 --step-delay-ms 5500 --chat-entry-timeout-ms 45000 --mock-llm --allow-chat-action`
+- P22 live validation passed with note:
+  - first run `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-chat-chain-p22-20260422-001.json` produced 5 successful chained samples but strict `ok=false` because one intermediate scan timed out.
+  - retry `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-chat-chain-p22-20260422-idx3-retry.json` passed with `ok=true`.
+  - total validated successful same-page chat entries: 6.
+  - `requestResumeClicks=0`; chat-side `request_resume` remained dry-run.
+- Infinite scroll requirement:
+  - recommend and chat candidate lists are infinite-scroll lists.
+  - tools must scroll until no further movement/progress and verify true bottom rather than blindly assuming bottom.
+  - recommend scroll audit may keep scrolling to exhaustion, but only when `riskBlocked=false` and a normal recommend target exists.
+- Audit commands:
+  - `node src/cli.js research chat-scroll-audit --debug-port 9222 --filter 有简历 --max-passes 40 --idle-passes 3`
+  - `node src/cli.js research recommend-scroll-audit --debug-port 9222 --max-passes 120 --idle-passes 3 --scroll-pages 6 --bottom-settle-delay-ms 5000 --terminal-signal true`
+- P18 command:
+  - `node src/cli.js research recommend-filter-execute --debug-port 9222 --preset p17`
+  - It defaults to `restore=true`: apply filters, then reset/apply to leave the page clean.
+- P19 command:
+  - `node src/cli.js research recommend-traversal-audit --debug-port 9222 --steps 10 --tab 推荐 --step-delay-ms 3500`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-traversal-audit-20260421-202447.json`
+- P20 command:
+  - `node src/cli.js research recommend-dry-run-screening --debug-port 9222 --candidate-limit 20 --tab 推荐 --step-delay-ms 5500 --mock-llm --mock-decision pass --mock-post-action chat`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-dry-run-screening-p20-20260421-002.json`
+  - result: 20 unique candidates, 14 structures, `llmCalls=20`, `coveragePassed=true`, `actionClicks=0`, `closeVerified=true`
+- P21 commands:
+  - `node src/cli.js research recommend-action --debug-port 9222 --action none --tab 推荐 --start-index 0 --step-delay-ms 5500`
+  - `node src/cli.js research recommend-action --debug-port 9222 --action chat --tab 推荐 --start-index 0 --step-delay-ms 5500 --allow-chat-action`
+  - latest none output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-none-p21-20260421-002.json`
+  - latest chat outputs:
+    - `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-chat-p21-20260421-idx0-pass4.json`
+    - `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-chat-p21-20260421-idx1.json`
+    - `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-chat-p21-20260421-idx2.json`
+  - result: `none` zero-click passed; 3 real `chat` actions opened `recommend_basic_chat_modal`, matched candidate name, saw `索要简历`, and returned to recommend page.
+- P22 command:
+  - `node src/cli.js research recommend-chat-chain --debug-port 9222 --candidate-limit 5 --scan-limit 10 --tab 推荐 --step-delay-ms 5500 --chat-entry-timeout-ms 45000 --mock-llm --allow-chat-action`
+  - default chat-side `request_resume` stays dry-run; pass `--execute-request-resume --allow-request-resume` only with explicit approval.
+  - live 5-sample evidence pending.
+- Use the validated P07 output:
+  - `C:\Users\yaolin\.liepin-recommend-mcp\research\cv-structure-survey-1776759213165.json`
+- Use the P08 decision:
+  - DOM `printable-content` is v1 primary.
+  - Network endpoints are evidence/fallback only.
+  - No OCR/image route.
+  - No automatic attachment/portfolio preview/download in v1.
+- Use P09 parser:
+  - `src/liepin/cv-parser.js`
+  - schema version `liepin_cv_v1`
+  - validation command `node src/cli.js research parse-survey --file <survey.json>`
+- P10 validation passed:
+  - 60/60 samples parsed
+  - 19/19 structures parsed
+  - all expected sampled sections present
+- Use P11 payload builder:
+  - `src/liepin/cv-payload.js`
+  - screen input schema `liepin_screen_input_v1`
+  - validation command `node src/cli.js research audit-payload --file <survey.json> --limit 10`
+- Use P12 LLM adapter:
+  - `src/llm-adapter.js`
+  - production mode only requests structured decision JSON
+  - do not request pass/fail reasons
+  - provider-native reasoning/CoT stream may be written to `reasoning.log`
+  - missing reasoning stream is not a bug
+- Use P13 ChatScreenInput:
+  - `src/liepin/chat-screen-input.js`
+  - schema version `liepin_chat_screen_input_v1`
+  - validation command `node src/cli.js research chat-screen-inputs --limit 10 --filter 有简历`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\chat-screen-inputs-1776766919422.json`
+- Use P14 policy:
+  - `src/liepin/chat-state-policy.js`
+  - validation command `node src/cli.js research chat-policy-audit --limit 30 --filter 有简历`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\chat-policy-audit-1776767095859.json`
+- Use P15 action executor:
+  - `src/liepin/chat-action.js`
+  - validation command after P24 gate: `node src/cli.js research chat-action --action request_resume --filter 有简历 --allow-request-resume`
+  - latest passing request output `C:\Users\yaolin\.liepin-recommend-mcp\research\chat-action-request-resume-rowkey-dom-cleanup-20260421-185036.json`
+  - latest passing none output `C:\Users\yaolin\.liepin-recommend-mcp\research\chat-action-none-postfix-20260421-185128.json`
+  - `request_resume` must verify the same stable `rowKey` changes from `索要简历` to `索要中`
+  - `none` must keep the same `rowKey` in `索要简历` with `clicked=false`
+- Use P16 chat dry-run screening:
+  - `src/liepin/chat-dry-run-screening.js`
+  - validation command `node src/cli.js research chat-dry-run-screening --candidate-limit 20 --row-limit 40 --filter 有简历 --mock-llm --mock-decision pass --mock-post-action request_resume`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\chat-dry-run-screening-mock-20260421-185718.json`
+  - 20 candidates processed, 7 structured screening calls, 0 action clicks, 0 violations
+  - mock LLM is explicit only; real provider requires valid `screening-config.json`
+- Use P17 recommend filter discovery:
+  - `src/liepin/recommend-filter-discovery.js`
+  - validation command `node src/cli.js research recommend-filter-discovery --debug-port 9222`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-filter-discovery-20260421-190854.json`
+  - verified v1 filters: `graduation_year`, `education`, `salary_range`, `age`, `school_tier`, `job_status`
+  - unsupported in v1: `salary_range_custom`
+- Use P18 recommend filter executor:
+  - `src/liepin/recommend-filter-executor.js`
+  - validation command `node src/cli.js research recommend-filter-execute --debug-port 9222 --preset p17`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-filter-execute-p17-20260421-194931.json`
+  - verified 6 filters, apply changed card count `20 -> 11`, restore changed it back `11 -> 20`, and restore selected state was empty.
+- Use P19 recommend traversal:
+  - `src/liepin/recommend-traversal.js`
+  - validation command `node src/cli.js research recommend-traversal-audit --debug-port 9222 --steps 10 --tab 推荐 --step-delay-ms 3500`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-traversal-audit-20260421-202447.json`
+  - 10/10 unique modal snapshots, `tabSwitchCount=3`, `closeVerified=true`, `failures=[]`
+- Use P20 recommend dry-run screening:
+  - `src/liepin/recommend-dry-run-screening.js`
+  - validation command `node src/cli.js research recommend-dry-run-screening --debug-port 9222 --candidate-limit 20 --tab 推荐 --step-delay-ms 5500 --mock-llm --mock-decision pass --mock-post-action chat`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-dry-run-screening-p20-20260421-002.json`
+  - 20/20 processed, 20 unique `textHash`, 14 unique structures, no truncation, no missing parsed sections, `actionClicks=0`
+- Use P21 recommend action:
+  - `src/liepin/recommend-action.js`
+  - validation command after P24 gate: `node src/cli.js research recommend-action --debug-port 9222 --action chat --tab 推荐 --start-index 0 --step-delay-ms 5500 --allow-chat-action`
+  - latest output `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-chat-p21-20260421-idx2.json`
+  - `chat` does not necessarily navigate to `/chat/im`; it opens same-page `recommend_basic_chat_modal`.
+  - successful chat entry requires candidate name match and `hasRequestResumeButton=true`.
+- Use P22 recommend-chat chain:
+  - `src/liepin/recommend-chat-chain.js`
+  - validation command after P24 gate: `node src/cli.js research recommend-chat-chain --debug-port 9222 --candidate-limit 5 --scan-limit 10 --tab 推荐 --step-delay-ms 5500 --chat-entry-timeout-ms 45000 --mock-llm --allow-chat-action`
+  - latest safe preflight `node src/cli.js research discover --debug-port 9222`: recommend target present, `riskBlocked=false`, `loginOk=true`, no risk page.
+  - first live run `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-chat-chain-p22-20260422-001.json`: 5 successful chained samples, 5 same-page chat entries, 5 chat LLM calls, `requestResumeClicks=0`, but one intermediate scan timed out at chat entry verification so strict `ok=false`.
+  - P22 projects same-page `recommend_basic_chat_modal` into a chat row state and applies P14/P16 rules.
+  - Only `索要简历` is screenable; `索要中` / `看简历` / `浏览简历` / unknown skip without chat LLM.
+  - `request_resume` is dry-run unless `--execute-request-resume --allow-request-resume` is explicitly passed.
+- Use P23 async run/doctor surface:
+  - `src/worker.js`
+  - `src/json-rpc.js`
+  - `src/doctor.js`
+  - `src/config.js`
+  - CLI async commands:
+    - `node src/cli.js recommend start --debug-port 9222 --candidate-limit 1 --mock-llm --mock-decision fail --mock-post-action none`
+    - `node src/cli.js chat start --debug-port 9222 --candidate-limit 20 --filter 有简历 --mock-llm`
+    - `node src/cli.js recommend-chat start --debug-port 9222 --candidate-limit 5 --scan-limit 10 --mock-llm --allow-chat-action`
+  - Latest async run evidence: `recommend-20260422021002-wjgli9`, completed, `workflow=recommend_dry_run_screening`, `actionClicks=0`.
+  - `runs resume` and MCP `liepin_run_resume` should not restart terminal runs.
+  - `doctor --fix` writes only missing config templates; it does not overwrite existing config.
+- Use P24 operator UX / side-effect gates:
+  - `src/run-state.js`
+  - `src/worker.js`
+  - `src/cli.js`
+  - `src/json-rpc.js`
+  - `runs status --run-id <id>` and `runs list` are compact by default.
+  - Use `--full` only when full workflow `result` payload is needed.
+  - New completed runs write `artifact_summary` and split artifacts for screen input, LLM request, decision, and coverage.
+  - Real chat side effects require CLI `--allow-chat-action` or MCP `allow_chat_action=true`.
+  - Real resume request side effects require CLI `--allow-request-resume` or MCP `allow_request_resume=true`.
+  - Latest P24 safe run evidence: `recommend-20260422023134-k762ox`, completed with `artifact_summary.itemCount=1`, `actionClicks=0`.
+- Use P25 real LLM provider surface:
+  - `src/provider-check.js`
+  - `src/llm-adapter.js`
+  - `node src/cli.js provider check --mode both`
+  - `node src/cli.js doctor --provider-check --debug-port 9222`
+  - `node src/cli.js recommend start --debug-port 9222 --candidate-limit 1` uses real LLM when `--mock-llm` is absent.
+  - Latest real LLM recommend run: `recommend-20260422025402-w5svxv`, passed, `mock_llm=false`, `actionClicks=0`.
+- Before any new live interaction, run `node src/cli.js research discover --debug-port 9222` and confirm `riskBlocked=false`.
+
+## Anti-Crawler Guardrails
+- Recommend sampler now has default `3500ms` step delay.
+- `safe.liepin.com` / `captchaPage` targets are classified as `risk`.
+- A stale risk tab does not block work if a normal recommend target exists.
+- If the current recommend target itself navigates to risk/captcha, stop immediately.
+
+## Live Environment Notes
+- Chrome `9222` is logged into Liepin.
+- Latest discovery after P26 found both recommend and chat pages present:
+  - `recommend=https://lpt.liepin.com/recommend`
+  - `chat=https://lpt.liepin.com/chat/im`
+  - `riskBlocked=false`
+  - `loginOk=true`
+  - no `riskPage`
+- Latest discovery after P18 found recommend page restored and usable.
+- Latest discovery after P19 found recommend page restored and usable.
+- Latest discovery after P20 found recommend page restored and usable.
+- Latest discovery after P21 found recommend page restored and usable.
+- P19 final discovery:
+  - `recommend=https://lpt.liepin.com/recommend`
+  - `riskBlocked=false`
+  - no `riskPage`
+- `research chat-sample --limit 5 --filter 有简历` returns 3 unique samples; user confirmed the page only has 3 candidates, so this is full coverage for `P06`.
+- P07 live survey sampled 60 unique detailed CVs and found 19 structures; final batch had zero new structures.
+- P08 acquisition probe passed after fixing chat row reactivation before `看简历` click.
+- P09 parser maps 60/60 P07 samples and 19/19 structure signatures.
+- P10 parser coverage audit confirms all expected sampled sections are present.
+- P11 payload audit confirms 10 diverse live samples include all parsed sections and are not truncated.
+- P12 LLM adapter confirms structured decisions only; provider-native reasoning stream is optional.
+- P13 chat input discovery captured 10 unique `索要简历` candidates; all had complete required DOM sources and `hasRequestResumeButton=true`.
+- P14 policy audit passed on 30 rows: 11 screenable, 19 skip, no violations.
+- P15 chat action executor passed:
+  - `none`: `clicked=false`, same `rowKey` stayed `索要简历`.
+  - `request_resume`: same `rowKey=3131d58334e164e158eca70cfd8965cf` changed `索要简历 -> 索要中`.
+  - Confirm modal text is `确定向对方索要简历吗？`; confirm button renders as `确 定` and must be compacted to `确定`.
+  - Row index is unsafe after request because the conversation list can reorder; always verify by stable `rowKey`.
+  - CDP coordinate click did not reliably trigger the confirm business action; exact DOM click on the real `button` did.
+- P16 chat dry-run screening passed:
+  - processed 20 candidate rows
+  - only 7 `索要简历` candidates called structured screening
+  - `看简历`, `索要中`, and system rows skipped without LLM
+  - `actionClicks=0`, `violations=[]`
+  - live validation used explicit `--mock-llm` because `screening-config.json` is missing
+- P17 recommend filter discovery passed:
+  - 6 live drawer filters verified with set/clear/active-state checks
+  - drawer selectors: `.ant-lpt-drawer-open`, `.ant-lpt-drawer-body`, `.filterItems--XYlh8`, `.itemTitle--y3zfr`, `.ant-lpt-tag-checkable`
+  - active tag class: `ant-lpt-tag-checkable-checked`
+  - age filter uses two `.ant-lpt-input` fields with placeholders `最低` / `最高`
+  - filter title matching must tolerate `薪资范围` vs `薪资范围（单选）`
+- Infinite scroll audit update:
+  - Added `src/liepin/infinite-scroll.js`
+  - Added `src/liepin/infinite-scroll.test.js`
+  - CLI commands: `research chat-scroll-audit`, `research recommend-scroll-audit`
+  - Chat live evidence: `C:\Users\yaolin\.liepin-recommend-mcp\research\chat-scroll-audit-20260421-194041.json`
+  - Chat result: `bottomConfirmed=true`, `falseBottomDetected=false`, `maxPassesReached=false`, `passCount=4`, `initialItemCount=30`, `finalItemCount=30`, `uniqueItemCount=22`
+  - Old recommend live evidence `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-scroll-audit-20260421-194816.json` is a false positive and must not be reused: it incorrectly marked 40 candidates as bottom.
+  - Corrected failure evidence: `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-scroll-audit-terminal-20260421-200828.json`
+  - Corrected failure result: `ok=false`, `maxPassesReached=true`, `initialItemCount=360`, `finalItemCount=960`, proving 40 was not bottom.
+  - Corrected pass evidence: `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-scroll-audit-terminal-pass-20260421-201538.json`
+  - Corrected recommend result: `bottomConfirmed=true`, `terminalSignalConfirmed=true`, `falseBottomDetected=false`, `maxPassesReached=false`, `passCount=38`, `finalItemCount=969`, `uniqueItemCount=969`
+  - Recommend terminal text is `我也是有底线的`; include it as a terminal signal.
+  - Recommend audit now requires terminal signal by default and uses longer bottom-settle waiting plus repeated bottom nudges.
+  - Use `textContent` rather than `innerText` for scroll audit row signatures; `innerText` was too expensive on chat.
+  - Fixed `src/chrome.js` CDP timer cleanup; unresolved timers made successful live commands linger for 30 seconds.
+  - Fixed `return await` in infinite-scroll CDP helpers; otherwise `finally` disconnected the socket before the audit promise completed.
+- P18 recommend filter executor passed:
+  - Added `src/liepin/recommend-filter-executor.js`
+  - Added `src/liepin/recommend-filter-executor.test.js`
+  - CLI command: `research recommend-filter-execute --preset p17`
+  - Supports custom flags: `--graduation-year`, `--education`, `--salary-range`, `--age-min`, `--age-max`, `--school-tier`, `--job-status`
+  - Latest output: `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-filter-execute-p17-20260421-194931.json`
+  - `actionCount=6`, `requestedCount=6`, `applyClicked=true`, `restored=true`, `failures=[]`
+  - First P18 run failed at restore because the entry button became `筛选·6`; fixed by matching prefix `筛选`.
+- P19 recommend traversal passed:
+  - Added `src/liepin/recommend-traversal.js`
+  - Added `src/liepin/recommend-traversal.test.js`
+  - CLI command: `research recommend-traversal-audit --steps 10 --tab 推荐 --step-delay-ms 3500`
+  - Latest output: `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-traversal-audit-20260421-202447.json`
+  - `requestedSteps=10`, `traversedSteps=10`, `uniqueSnapshots=10`, `tabSwitchCount=3`, `closeVerified=true`, `failures=[]`
+  - Tab active class can lag behind list updates; validation accepts active class or proven card list change after click.
+  - Modal close can leave animation/hash residue; close verification waits for modal/printable absence or invisibility and clears `#preview`.
+- P20 recommend dry-run screening passed:
+  - Added `src/liepin/recommend-dry-run-screening.js`
+  - Added `src/liepin/recommend-dry-run-screening.test.js`
+  - Fixed `candidateLabel` extraction in recommend/chat resume snapshots so label no longer duplicates the full CV after whitespace normalization.
+  - CLI command: `research recommend-dry-run-screening --candidate-limit 20 --tab 推荐 --step-delay-ms 5500 --mock-llm --mock-decision pass --mock-post-action chat`
+  - Latest output: `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-dry-run-screening-p20-20260421-002.json`
+  - Summary: `processedCandidates=20`, `llmCalls=20`, `coveragePassed=true`, `actionClicks=0`, `closeVerified=true`, `violations=[]`
+  - File audit: 20 unique candidates, 14 unique structures, all payloads untruncated, all `missingParsedSectionIds=[]`
+  - Mock `pass/chat` was used to prove dry-run still performs zero action clicks even when the decision would request chat.
+- P21 recommend action executor passed:
+  - Added `src/liepin/recommend-action.js`
+  - Added `src/liepin/recommend-action.test.js`
+  - CLI command after P24 gate: `research recommend-action --action none|chat --tab 推荐 --start-index <n> --step-delay-ms 5500 --allow-chat-action` when `action=chat`
+  - None output: `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-none-p21-20260421-002.json`
+  - Chat outputs:
+    - `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-chat-p21-20260421-idx0-pass4.json`
+    - `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-chat-p21-20260421-idx1.json`
+    - `C:\Users\yaolin\.liepin-recommend-mcp\research\recommend-action-chat-p21-20260421-idx2.json`
+  - `none`: candidate `候选人A`, `actionClicks=0`, modal stable, close passed.
+  - `chat`: candidates `候选人B`, `候选人C`, `候选人D`; all had `candidateNameMatched=true`, `entryKind=recommend_basic_chat_modal`, `hasRequestResumeButton=true`, `returnedToRecommend=true`.
+  - Recommend `立即沟通` can produce either lightweight welcome popover or `im-ui-recommend-chat-modal`; after that `继续沟通` opens `im-ui-basic-chat-modal`.
+- `screening-config.json` now exists under `C:\Users\yaolin\.liepin-recommend-mcp\` using the BOSS MCP provider settings. Do not disclose the apiKey.
+
+## Test Command
+- Preferred in current sandbox:
+  - `node --test --test-isolation=none src/config.test.js src/run-state.test.js src/json-rpc.test.js src/worker.test.js src/doctor.test.js src/provider-check.test.js src/chrome.test.js src/liepin/cv-survey.test.js src/liepin/cv-parser.test.js src/liepin/cv-payload.test.js src/liepin/chat-screen-input.test.js src/liepin/chat-state-policy.test.js src/liepin/chat-action.test.js src/liepin/chat-dry-run-screening.test.js src/liepin/recommend-filter-discovery.test.js src/liepin/recommend-filter-executor.test.js src/liepin/recommend-traversal.test.js src/liepin/recommend-dry-run-screening.test.js src/liepin/recommend-action.test.js src/liepin/recommend-chat-chain.test.js src/liepin/infinite-scroll.test.js src/llm-adapter.test.js`
+- Latest result:
+  - 66 tests passed.
+- `npm test` passed in the 2026-04-22 P25 session.
