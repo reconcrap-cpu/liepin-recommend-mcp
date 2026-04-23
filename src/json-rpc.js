@@ -80,7 +80,8 @@ function createTools() {
           write_config_template: { type: "boolean" },
           overwrite_config_template: { type: "boolean" },
           export_external_config: { type: "boolean" },
-          external_config_path: { type: "string" }
+          external_config_path: { type: "string" },
+          agent: { type: "string" }
         },
         additionalProperties: false
       }
@@ -94,7 +95,8 @@ function createTools() {
           debug_port: { type: "integer", minimum: 1 },
           provider_check: { type: "boolean" },
           export_external_config: { type: "boolean" },
-          external_config_path: { type: "string" }
+          external_config_path: { type: "string" },
+          agent: { type: "string" }
         },
         additionalProperties: false
       }
@@ -262,7 +264,8 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
         writeConfigTemplate: args.write_config_template ?? true,
         overwriteConfigTemplate: Boolean(args.overwrite_config_template),
         exportExternalConfig: args.export_external_config ?? true,
-        externalConfigPath: args.external_config_path || null
+        externalConfigPath: args.external_config_path || null,
+        agent: args.agent || null
       });
       return createToolResult(id, payload, !payload.ok);
     }
@@ -273,7 +276,8 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
         port: args.debug_port || DEFAULT_DEBUG_PORT,
         providerCheck: Boolean(args.provider_check),
         exportExternalConfig: args.export_external_config ?? true,
-        externalConfigPath: args.external_config_path || null
+        externalConfigPath: args.external_config_path || null,
+        agent: args.agent || null
       });
       return createToolResult(id, payload, !payload.ok);
     }

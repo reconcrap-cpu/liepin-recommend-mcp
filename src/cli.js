@@ -54,6 +54,7 @@ import {
   runRecommendDryRunScreening,
   summarizeRecommendDryRunScreening
 } from "./liepin/recommend-dry-run-screening.js";
+import { createLineFramedServer } from "./json-rpc.js";
 import { runProviderCheck } from "./provider-check.js";
 import {
   exportExternalAgentConfig,
@@ -92,6 +93,11 @@ export async function runCli(argv = process.argv.slice(2)) {
     return;
   }
 
+  if (command === "start") {
+    createLineFramedServer();
+    return;
+  }
+
   if (command === "doctor") {
     const result = await runDoctor({
       workspaceRoot: getWorkspaceRoot(),
@@ -121,7 +127,8 @@ export async function runCli(argv = process.argv.slice(2)) {
       ),
       externalConfigPath: normalizeText(
         rootFlags["external-config-path"] || rootFlags.externalConfigPath
-      ) || null
+      ) || null,
+      agent: normalizeText(rootFlags.agent) || null
     });
     printJson(result);
     return;
@@ -138,7 +145,8 @@ export async function runCli(argv = process.argv.slice(2)) {
       ),
       externalConfigPath: normalizeText(
         rootFlags["external-config-path"] || rootFlags.externalConfigPath
-      ) || null
+      ) || null,
+      agent: normalizeText(rootFlags.agent) || null
     });
     printJson(result);
     if (!result.ok) process.exitCode = 1;
@@ -791,9 +799,10 @@ function buildHelp() {
   return [
     "liepin-recommend-mcp commands",
     "",
+    "  start",
     "  doctor [--debug-port 9222] [--fix] [--provider-check]",
-    "  install [--write-config-template true|false] [--overwrite-config-template] [--export-external-config true|false] [--external-config-path <path>]",
-    "  self-heal [--debug-port 9222] [--provider-check] [--export-external-config true|false] [--external-config-path <path>]",
+    "  install [--agent trae-cn|openclaw|cursor|trae|claude|all] [--write-config-template true|false] [--overwrite-config-template] [--export-external-config true|false] [--external-config-path <path>]",
+    "  self-heal [--agent trae-cn|openclaw|cursor|trae|claude|all] [--debug-port 9222] [--provider-check] [--export-external-config true|false] [--external-config-path <path>]",
     "  skill export [--format markdown|json] [--output <path>]",
     "  external-agent config [--output <path>]",
     "  external-agent-config [--output <path>]",

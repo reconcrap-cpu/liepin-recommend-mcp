@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { DEFAULT_DEBUG_PORT, SERVER_NAME, TOOL_NAMES } from "./constants.js";
 import {
@@ -13,16 +15,405 @@ import { ensureDirSync, normalizeText, toIsoNow, writeJsonFile } from "./utils.j
 
 export const EXTERNAL_AGENT_CONFIG_SCHEMA_VERSION = "liepin_external_agent_config_v1";
 export const SKILL_EXPORT_SCHEMA_VERSION = "liepin_skill_export_v1";
+export const defaultSkillName = "liepin-recommend-pipeline";
+export const bundledSkillNames = [defaultSkillName];
+
+const currentFilePath = fileURLToPath(import.meta.url);
+const packageRoot = path.resolve(path.dirname(currentFilePath), "..");
+const packageJsonPath = path.join(packageRoot, "package.json");
+const supportedExternalAgents = ["cursor", "trae", "trae-cn", "claude", "openclaw"];
+const externalMcpTargetsEnv = "LIEPIN_MCP_CONFIG_TARGETS";
+const externalSkillDirsEnv = "LIEPIN_EXTERNAL_SKILL_DIRS";
+const liepinPackageName = "@reconcrap/liepin-recommend-mcp";
+const liepinBinaryName = "liepin-recommend-mcp";
+
+function getPackageVersion() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    return typeof parsed?.version === "string" ? parsed.version.trim() : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const packageVersion = getPackageVersion();
+
+function isInstalledPackageRoot(rootPath = packageRoot) {
+  const normalized = path.resolve(String(rootPath || ""))
+    .replace(/\\/g, "/")
+    .toLowerCase();
+  return (
+    normalized.includes("/appdata/local/npm-cache/_npx/")
+    || normalized.includes("/node_modules/@reconcrap/liepin-recommend-mcp")
+  );
+}
+
+function getDefaultMcpPackageSpecifier(options = {}) {
+  const version = String(options.packageVersion || packageVersion).trim();
+  const rootPath = options.packageRootPath || packageRoot;
+  if (version && version !== "0.0.0" && isInstalledPackageRoot(rootPath)) {
+    return `${liepinPackageName}@${version}`;
+  }
+  return `${liepinPackageName}@latest`;
+}
+
+function getCodexHome() {
+  return process.env.CODEX_HOME
+    ? path.resolve(process.env.CODEX_HOME)
+    : path.join(os.homedir(), ".codex");
+}
+
+function getSkillSourceDir(name = defaultSkillName) {
+  return path.join(packageRoot, "skills", name);
+}
+
+function getSkillTargetDir(name = defaultSkillName) {
+  return path.join(getCodexHome(), "skills", name);
+}
+
+function getSkillVersionMarkerPath(name = defaultSkillName) {
+  return path.join(getSkillTargetDir(name), ".installed-version");
+}
+
+function readInstalledSkillVersion(name = defaultSkillName) {
+  const markerPath = getSkillVersionMarkerPath(name);
+  if (!pathExists(markerPath)) return null;
+  try {
+    return fs.readFileSync(markerPath, "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeInstalledSkillVersion(name, version) {
+  const markerPath = getSkillVersionMarkerPath(name);
+  ensureDirSync(path.dirname(markerPath));
+  fs.writeFileSync(markerPath, `${version}\n`, "utf8");
+}
+
+function pathExists(targetPath) {
+  try {
+    return fs.existsSync(targetPath);
+  } catch {
+    return false;
+  }
+}
+
+function readJsonObjectFileSafe(filePath) {
+  if (!pathExists(filePath)) return {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // Fallback below.
+  }
+  return {};
+}
+
+function dedupePaths(items) {
+  const result = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    const raw = String(item ?? "").trim();
+    if (!raw) continue;
+    const resolved = path.resolve(raw);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    result.push(resolved);
+  }
+  return result;
+}
+
+function dedupeLower(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function discoverAppDataDirsByPattern(baseDir, pattern) {
+  try {
+    if (!pathExists(baseDir)) return [];
+    const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory() && pattern.test(entry.name))
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function parsePathListFromEnv(raw) {
+  if (!raw) return [];
+  const text = String(raw).trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return dedupePaths(parsed.filter(Boolean));
+    }
+  } catch {
+    // Fallback to delimiter split.
+  }
+  return dedupePaths(text.split(path.delimiter).map((item) => item.trim()).filter(Boolean));
+}
+
+function normalizeAgentName(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw === "claude-code") return "claude";
+  return raw;
+}
+
+function parseAgentTargets(rawValue) {
+  if (!rawValue) return supportedExternalAgents.slice();
+  const raw = String(rawValue).trim().toLowerCase();
+  if (!raw || raw === "all") return supportedExternalAgents.slice();
+  const candidates = raw.split(",").map(normalizeAgentName).filter(Boolean);
+  const unique = [...new Set(candidates)];
+  const invalid = unique.filter((item) => !supportedExternalAgents.includes(item));
+  if (invalid.length > 0) {
+    throw new Error(`Unsupported --agent value: ${invalid.join(", ")}. Supported: ${supportedExternalAgents.join(", ")}, all`);
+  }
+  return unique;
+}
+
+function buildExternalMcpLaunchConfig(options = {}) {
+  const command = normalizeText(options.command) || "npx";
+  const explicitArgs = options.args;
+  const launchArgs = Array.isArray(explicitArgs) && explicitArgs.length > 0
+    ? explicitArgs
+    : command === liepinBinaryName
+      ? ["start"]
+      : ["-y", getDefaultMcpPackageSpecifier(options), "start"];
+  const launchConfig = {
+    command,
+    args: launchArgs
+  };
+  if (options.env && typeof options.env === "object" && !Array.isArray(options.env)) {
+    launchConfig.env = options.env;
+  }
+  return launchConfig;
+}
+
+function buildMcpConfigFileContent(options = {}) {
+  const serverName = normalizeText(options.serverName || options.server_name) || SERVER_NAME;
+  return {
+    mcpServers: {
+      [serverName]: buildExternalMcpLaunchConfig(options)
+    }
+  };
+}
+
+function getKnownExternalMcpConfigPathsByAgent() {
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+  const traeDirNames = dedupeLower([
+    "Trae",
+    "Trae CN",
+    "TraeCN",
+    "trae-cn",
+    "trae_cn",
+    ...discoverAppDataDirsByPattern(appData, /^trae(?:[\s\-_]?cn)?$/i)
+  ]);
+  const traeConfigPaths = traeDirNames.map((dir) => path.join(appData, dir, "User", "mcp.json"));
+  return {
+    cursor: [path.join(appData, "Cursor", "User", "mcp.json"), path.join(home, ".cursor", "mcp.json")],
+    trae: [...traeConfigPaths, path.join(home, ".trae", "mcp.json"), path.join(home, ".trae-cn", "mcp.json")],
+    "trae-cn": [...traeConfigPaths, path.join(home, ".trae-cn", "mcp.json"), path.join(home, ".trae", "mcp.json")],
+    claude: [path.join(home, ".claude", "mcp.json")],
+    openclaw: [path.join(home, ".openclaw", "mcp.json")]
+  };
+}
+
+function resolveExternalMcpConfigTargets(options = {}) {
+  const fromEnv = parsePathListFromEnv(process.env[externalMcpTargetsEnv]);
+  const pathMap = getKnownExternalMcpConfigPathsByAgent();
+  const agents = parseAgentTargets(options.agent);
+  const knownCandidates = agents.flatMap((agent) => pathMap[agent] || []);
+  const known = dedupePaths(knownCandidates).filter((filePath) => {
+    if (options.agent) return true;
+    if (pathExists(filePath)) return true;
+    return pathExists(path.dirname(filePath));
+  });
+  return dedupePaths([...fromEnv, ...known]);
+}
+
+function mergeMcpServerConfigFile(filePath, options = {}) {
+  const nextConfig = buildMcpConfigFileContent(options);
+  const serverName = Object.keys(nextConfig.mcpServers || {})[0] || SERVER_NAME;
+  const launchConfig = nextConfig.mcpServers?.[serverName] || buildExternalMcpLaunchConfig(options);
+  const current = readJsonObjectFileSafe(filePath);
+  const existingServers =
+    current?.mcpServers && typeof current.mcpServers === "object" && !Array.isArray(current.mcpServers)
+      ? current.mcpServers
+      : {};
+  const existingEntry = existingServers[serverName];
+  const merged = {
+    ...current,
+    mcpServers: {
+      ...existingServers,
+      [serverName]: launchConfig
+    }
+  };
+  ensureDirSync(path.dirname(filePath));
+  fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), "utf8");
+  const updated = JSON.stringify(existingEntry || null) !== JSON.stringify(launchConfig);
+  return {
+    file: filePath,
+    server: serverName,
+    updated
+  };
+}
+
+function installExternalMcpConfigs(options = {}) {
+  const targets = resolveExternalMcpConfigTargets(options);
+  const applied = [];
+  const skipped = [];
+  for (const target of targets) {
+    try {
+      const existed = pathExists(target);
+      const merged = mergeMcpServerConfigFile(target, options);
+      applied.push({
+        file: target,
+        server: merged.server,
+        created: !existed,
+        updated: merged.updated
+      });
+    } catch (error) {
+      skipped.push({
+        file: target,
+        reason: error?.message || String(error)
+      });
+    }
+  }
+  return { targets, applied, skipped };
+}
+
+function getKnownExternalSkillBaseDirsByAgent() {
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+  const traeDirNames = dedupeLower([
+    "Trae",
+    "Trae CN",
+    "TraeCN",
+    "trae-cn",
+    "trae_cn",
+    ...discoverAppDataDirsByPattern(appData, /^trae(?:[\s\-_]?cn)?$/i)
+  ]);
+  const traeSkillDirs = traeDirNames.map((dir) => path.join(appData, dir, "User", "skills"));
+  return {
+    cursor: [path.join(home, ".cursor", "skills"), path.join(appData, "Cursor", "User", "skills")],
+    trae: [path.join(home, ".trae", "skills"), path.join(home, ".trae-cn", "skills"), ...traeSkillDirs],
+    "trae-cn": [path.join(home, ".trae-cn", "skills"), path.join(home, ".trae", "skills"), ...traeSkillDirs],
+    claude: [path.join(home, ".claude", "skills")],
+    openclaw: [path.join(home, ".openclaw", "skills"), path.join(appData, "OpenClaw", "User", "skills")]
+  };
+}
+
+function resolveExternalSkillBaseDirs(options = {}) {
+  const fromEnv = parsePathListFromEnv(process.env[externalSkillDirsEnv]);
+  const pathMap = getKnownExternalSkillBaseDirsByAgent();
+  const agents = parseAgentTargets(options.agent);
+  const knownCandidates = agents.flatMap((agent) => pathMap[agent] || []);
+  const known = dedupePaths(knownCandidates).filter((dirPath) => {
+    if (options.agent) return true;
+    return pathExists(dirPath);
+  });
+  return dedupePaths([...fromEnv, ...known]);
+}
+
+function syncSkillAssets(options = {}) {
+  const force = options.force === true;
+  const results = [];
+  for (const skillName of bundledSkillNames) {
+    const sourceDir = getSkillSourceDir(skillName);
+    const targetDir = getSkillTargetDir(skillName);
+    const skillEntry = path.join(targetDir, "SKILL.md");
+    const installedVersion = readInstalledSkillVersion(skillName);
+    const sourceMissing = !pathExists(path.join(sourceDir, "SKILL.md"));
+    const needsSync = !sourceMissing && (force || !pathExists(skillEntry) || installedVersion !== packageVersion);
+    if (needsSync) {
+      ensureDirSync(path.dirname(targetDir));
+      fs.cpSync(sourceDir, targetDir, { recursive: true, force: true });
+      writeInstalledSkillVersion(skillName, packageVersion);
+    }
+    results.push({
+      skill: skillName,
+      sourceDir,
+      targetDir,
+      updated: needsSync,
+      sourceMissing,
+      installedVersion,
+      packageVersion
+    });
+  }
+  return {
+    primaryTargetDir: results[0]?.targetDir || null,
+    results
+  };
+}
+
+function installSkill() {
+  return syncSkillAssets({ force: true }).results;
+}
+
+function mirrorSkillToExternalDirs(options = {}) {
+  const baseDirs = resolveExternalSkillBaseDirs(options);
+  const mirrored = [];
+  const skipped = [];
+  for (const baseDir of baseDirs) {
+    for (const skillName of bundledSkillNames) {
+      const sourceDir = getSkillSourceDir(skillName);
+      if (!pathExists(path.join(sourceDir, "SKILL.md"))) {
+        skipped.push({
+          base_dir: baseDir,
+          skill: skillName,
+          reason: `Skill source missing: ${sourceDir}`
+        });
+        continue;
+      }
+      try {
+        const targetDir = path.join(baseDir, skillName);
+        ensureDirSync(path.dirname(targetDir));
+        fs.cpSync(sourceDir, targetDir, { recursive: true, force: true });
+        mirrored.push({
+          base_dir: baseDir,
+          target_dir: targetDir,
+          skill: skillName
+        });
+      } catch (error) {
+        skipped.push({
+          base_dir: baseDir,
+          skill: skillName,
+          reason: error?.message || String(error)
+        });
+      }
+    }
+  }
+  return { baseDirs, mirrored, skipped };
+}
 
 export function runInstall({
   workspaceRoot,
   writeConfigTemplate = true,
   overwriteConfigTemplate = false,
   exportExternalConfig = true,
-  externalConfigPath = null
+  externalConfigPath = null,
+  agent = null
 } = {}) {
   const layout = ensureRuntimeLayout(workspaceRoot);
   const fixes = [];
+  const skillInstall = installSkill();
+  const externalMcpConfigs = installExternalMcpConfigs({ agent });
+  const externalSkillInstall = mirrorSkillToExternalDirs({ agent });
 
   if (writeConfigTemplate) {
     fixes.push({
@@ -45,6 +436,9 @@ export function runInstall({
     ok: true,
     installed: true,
     runtimeLayout: layout,
+    skillInstall,
+    externalMcpConfigs,
+    externalSkillInstall,
     screeningConfig: {
       path: screeningConfig.configPath,
       exists: screeningConfig.exists,
@@ -55,7 +449,11 @@ export function runInstall({
     hints: {
       doctor: `node src/cli.js doctor --debug-port ${DEFAULT_DEBUG_PORT}`,
       selfHeal: "node src/cli.js self-heal",
-      providerCheck: "node src/cli.js provider check --mode both"
+      providerCheck: "node src/cli.js provider check --mode both",
+      environment: {
+        mcpTargetsEnv: externalMcpTargetsEnv,
+        skillDirsEnv: externalSkillDirsEnv
+      }
     }
   };
 }
@@ -65,14 +463,16 @@ export async function runSelfHeal({
   port = DEFAULT_DEBUG_PORT,
   providerCheck = false,
   exportExternalConfig = true,
-  externalConfigPath = null
+  externalConfigPath = null,
+  agent = null
 } = {}) {
   const install = runInstall({
     workspaceRoot,
     writeConfigTemplate: true,
     overwriteConfigTemplate: false,
     exportExternalConfig,
-    externalConfigPath
+    externalConfigPath,
+    agent
   });
   const doctor = await runDoctor({
     workspaceRoot,
@@ -88,12 +488,20 @@ export async function runSelfHeal({
 }
 
 export function buildExternalAgentConfig({
-  workspaceRoot
+  workspaceRoot,
+  command = null,
+  args = null,
+  env = null,
+  serverName = SERVER_NAME
 } = {}) {
   const layout = ensureRuntimeLayout(workspaceRoot);
   const workspace = path.resolve(layout.workspaceRoot);
-  const serverScriptPath = path.join(workspace, "src", "index.js");
-  const serverCommand = process.execPath;
+  const launchConfig = buildExternalMcpLaunchConfig({
+    command,
+    args,
+    env,
+    packageVersion
+  });
   return {
     schemaVersion: EXTERNAL_AGENT_CONFIG_SCHEMA_VERSION,
     generatedAt: toIsoNow(),
@@ -102,14 +510,7 @@ export function buildExternalAgentConfig({
     runtimeHome: layout.stateHome,
     screeningConfigPath: layout.configPath,
     mcpServers: {
-      [SERVER_NAME]: {
-        command: serverCommand,
-        args: [serverScriptPath],
-        cwd: workspace,
-        env: {
-          LIEPIN_WORKSPACE_ROOT: workspace
-        }
-      }
+      [normalizeText(serverName) || SERVER_NAME]: launchConfig
     },
     tools: Object.values(TOOL_NAMES)
   };
@@ -117,12 +518,20 @@ export function buildExternalAgentConfig({
 
 export function exportExternalAgentConfig({
   workspaceRoot,
-  outputPath = null
+  outputPath = null,
+  command = null,
+  args = null,
+  env = null,
+  serverName = SERVER_NAME
 } = {}) {
   const layout = ensureRuntimeLayout(workspaceRoot);
   const targetPath = resolveExternalAgentConfigPath(layout.workspaceRoot, outputPath);
   const config = buildExternalAgentConfig({
-    workspaceRoot: layout.workspaceRoot
+    workspaceRoot: layout.workspaceRoot,
+    command,
+    args,
+    env,
+    serverName
   });
   writeJsonFile(targetPath, config);
   return {
@@ -205,6 +614,8 @@ function buildSkillExportMarkdown(payload = {}) {
     "",
     "- Real recommend chat click requires `--allow-chat-action` / `allow_chat_action=true`.",
     "- Real request-resume click requires `--allow-request-resume` / `allow_request_resume=true`.",
+    `- External MCP target override env: \`${externalMcpTargetsEnv}\``,
+    `- External skill target override env: \`${externalSkillDirsEnv}\``,
     "",
     "## Tool Names",
     "",
@@ -229,3 +640,15 @@ function resolveExternalAgentConfigPath(workspaceRoot, outputPath = null) {
   const runtimeHome = ensureRuntimeLayout(workspaceRoot).stateHome;
   return path.join(runtimeHome, "external-agent-config.json");
 }
+
+export const __testables = {
+  buildExternalMcpLaunchConfig,
+  dedupePaths,
+  installExternalMcpConfigs,
+  installSkill,
+  mergeMcpServerConfigFile,
+  mirrorSkillToExternalDirs,
+  parseAgentTargets,
+  resolveExternalMcpConfigTargets,
+  resolveExternalSkillBaseDirs
+};

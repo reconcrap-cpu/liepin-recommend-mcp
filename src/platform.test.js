@@ -31,10 +31,12 @@ test("buildExternalAgentConfig includes MCP server bootstrap fields", () => {
   withRuntimeHome(workspaceRoot, () => {
     const config = buildExternalAgentConfig({ workspaceRoot });
     assert.equal(Boolean(config.mcpServers["liepin-recommend-mcp"]), true);
+    assert.equal(config.mcpServers["liepin-recommend-mcp"].command, "npx");
     assert.equal(
-      config.mcpServers["liepin-recommend-mcp"].env.LIEPIN_WORKSPACE_ROOT,
-      path.resolve(workspaceRoot)
+      config.mcpServers["liepin-recommend-mcp"].args.some((item) => String(item).includes("liepin-recommend-mcp")),
+      true
     );
+    assert.equal(config.mcpServers["liepin-recommend-mcp"].args.includes("start"), true);
   });
 });
 
@@ -58,17 +60,104 @@ test("exportSkill supports markdown and json formats", () => {
   });
 });
 
+test("runInstall syncs MCP config and skill into trae-cn targets", () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-platform-"));
+  withRuntimeHome(workspaceRoot, () => {
+    const fakeHome = path.join(workspaceRoot, "profile");
+    const fakeAppData = path.join(fakeHome, "AppData", "Roaming");
+    const traeMcpPath = path.join(fakeAppData, "Trae", "User", "mcp.json");
+    const traeSkillsDir = path.join(fakeAppData, "Trae", "User", "skills");
+
+    fs.mkdirSync(path.dirname(traeMcpPath), { recursive: true });
+    fs.mkdirSync(traeSkillsDir, { recursive: true });
+    fs.writeFileSync(traeMcpPath, JSON.stringify({
+      mcpServers: {
+        existing: { command: "node", args: ["existing.js"] }
+      }
+    }, null, 2));
+
+    withFakeHomeAndAppData(fakeHome, fakeAppData, () => {
+      const result = runInstall({
+        workspaceRoot,
+        exportExternalConfig: false,
+        agent: "trae-cn"
+      });
+      assert.equal(result.ok, true);
+      assert.equal(
+        result.externalMcpConfigs.applied.some((item) => path.resolve(item.file) === path.resolve(traeMcpPath)),
+        true
+      );
+      const mcpConfig = JSON.parse(fs.readFileSync(traeMcpPath, "utf8"));
+      assert.equal(Boolean(mcpConfig.mcpServers.existing), true);
+      assert.equal(Boolean(mcpConfig.mcpServers["liepin-recommend-mcp"]), true);
+      assert.equal(
+        fs.existsSync(path.join(traeSkillsDir, "liepin-recommend-pipeline", "SKILL.md")),
+        true
+      );
+    });
+  });
+});
+
 function withRuntimeHome(workspaceRoot, callback) {
-  const previous = process.env[ENV_HOME];
+  const previous = {
+    [ENV_HOME]: process.env[ENV_HOME],
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    HOMEDRIVE: process.env.HOMEDRIVE,
+    HOMEPATH: process.env.HOMEPATH,
+    APPDATA: process.env.APPDATA
+  };
+  const fakeHome = path.join(workspaceRoot, "profile");
+  const fakeAppData = path.join(fakeHome, "AppData", "Roaming");
+  const parsedHome = path.parse(path.resolve(fakeHome));
+
   process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
+  process.env.HOMEDRIVE = parsedHome.root.replace(/\\$/, "");
+  process.env.HOMEPATH = `\\${path.relative(parsedHome.root, fakeHome).replace(/\//g, "\\")}`;
+  process.env.APPDATA = fakeAppData;
+
   try {
     return callback();
   } finally {
-    if (previous === undefined) {
-      delete process.env[ENV_HOME];
-    } else {
-      process.env[ENV_HOME] = previous;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
     }
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+}
+
+function withFakeHomeAndAppData(fakeHome, fakeAppData, callback) {
+  const previous = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    HOMEDRIVE: process.env.HOMEDRIVE,
+    HOMEPATH: process.env.HOMEPATH,
+    APPDATA: process.env.APPDATA
+  };
+
+  const resolvedHome = path.resolve(fakeHome);
+  const parsedHome = path.parse(resolvedHome);
+  process.env.HOME = resolvedHome;
+  process.env.USERPROFILE = resolvedHome;
+  process.env.HOMEDRIVE = parsedHome.root.replace(/\\$/, "");
+  process.env.HOMEPATH = `\\${path.relative(parsedHome.root, resolvedHome).replace(/\//g, "\\")}`;
+  process.env.APPDATA = fakeAppData;
+
+  try {
+    return callback();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   }
 }
