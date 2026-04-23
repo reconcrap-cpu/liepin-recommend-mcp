@@ -71,9 +71,6 @@ export function buildScreeningLlmRequest({
         })
       }
     ],
-    response_format: {
-      type: "json_object"
-    },
     temperature: 0
   };
 }
@@ -162,7 +159,6 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
         body: JSON.stringify({
           model: config.model,
           messages: request.messages,
-          response_format: request.response_format,
           temperature: request.temperature
         }),
         signal: controller?.signal
@@ -192,14 +188,21 @@ function extractResponseContent(response) {
   if (typeof response === "string") return response;
   if (response?.content) return response.content;
   const messageContent = response?.choices?.[0]?.message?.content;
+  if (Array.isArray(messageContent)) {
+    return messageContent
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (typeof item?.text === "string") return item.text;
+        return "";
+      })
+      .join("\n");
+  }
   if (messageContent) return messageContent;
   return JSON.stringify(response || {});
 }
 
 function normalizeDecision(content, mode) {
-  const parsed = typeof content === "object" && content !== null
-    ? content
-    : JSON.parse(String(content || "{}"));
+  const parsed = parseJsonObjectContent(content);
   const decision = normalizeDecisionValue(parsed.decision);
   const postAction = normalizeText(parsed.post_action);
   if (!["pass", "fail"].includes(decision)) {
@@ -271,6 +274,96 @@ function normalizeFetchError(error, attempt, maxRetries) {
     return new Error(`LLM request timed out${attempt < maxRetries ? ", retrying" : ""}`);
   }
   return error;
+}
+
+function parseJsonObjectContent(content) {
+  if (content && typeof content === "object" && !Array.isArray(content)) {
+    return content;
+  }
+  const raw = String(content || "").trim();
+  if (!raw) {
+    throw new Error("LLM response is empty");
+  }
+  const candidates = [raw];
+  const fencedMatches = raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi);
+  for (const match of fencedMatches) {
+    const candidate = String(match?.[1] || "").trim();
+    if (candidate) candidates.push(candidate);
+  }
+  const extractedObject = extractFirstJsonObject(raw);
+  if (extractedObject) candidates.push(extractedObject);
+  for (const candidate of dedupeStrings(candidates)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Continue trying other candidates.
+    }
+  }
+  throw new Error(`LLM response is not valid JSON object: ${truncateText(raw, 200)}`);
+}
+
+function extractFirstJsonObject(text) {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (start < 0) {
+      if (char === "{") {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
+}
+
+function dedupeStrings(values) {
+  const seen = new Set();
+  const deduped = [];
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+  return deduped;
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 function parsePositiveInteger(value, fallback) {
