@@ -17,6 +17,7 @@ export async function runChatDryRunScreening({
   rowLimit = 40,
   conversationFilterLabel = "有简历",
   maxScrollPasses = 3,
+  criteria = null,
   config = null,
   provider = null,
   onProgress = null
@@ -155,6 +156,8 @@ export async function runChatDryRunScreening({
           const screening = await runStructuredScreening({
             mode: SCREENING_MODES.CHAT,
             screenInput,
+            criteria,
+            operatorFilters: conversationFilterLabel,
             config,
             provider
           });

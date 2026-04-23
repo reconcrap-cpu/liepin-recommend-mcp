@@ -10,11 +10,22 @@ import { readScreeningConfig, validateScreeningConfig, writeScreeningConfigTempl
 
 test("validateScreeningConfig rejects placeholder config", () => {
   const result = validateScreeningConfig({
-    baseUrl: "https://example.com/v1",
+    baseUrl: "https://your-llm-endpoint.example.com/v1",
     apiKey: "replace-with-real-api-key",
-    model: "test-model"
+    model: "your-model-name"
   });
   assert.equal(result.ok, false);
+});
+
+test("validateScreeningConfig rejects template baseUrl and model even with non-placeholder apiKey", () => {
+  const result = validateScreeningConfig({
+    baseUrl: "https://your-llm-endpoint.example.com/v1",
+    apiKey: "sk-test",
+    model: "your-model-name"
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.message.includes("baseUrl"), true);
+  assert.equal(result.message.includes("model"), true);
 });
 
 test("validateScreeningConfig accepts usable config", () => {

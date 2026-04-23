@@ -190,6 +190,8 @@ export async function executeWorkflow({
       startIndex: parseNonNegativeInteger(input.start_index, 0),
       stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
       maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      criteria: normalizeText(input.criteria) || null,
+      operatorFilter: normalizeText(input.filter) || null,
       config: llm.config,
       provider: llm.provider,
       onProgress
@@ -208,6 +210,7 @@ export async function executeWorkflow({
       rowLimit: parsePositiveInteger(input.row_limit, 40),
       maxScrollPasses: parsePositiveInteger(input.max_scroll_passes, 3),
       conversationFilterLabel: normalizeText(input.filter) || "有简历",
+      criteria: normalizeText(input.criteria) || null,
       config: llm.config,
       provider: llm.provider,
       onProgress
@@ -229,6 +232,9 @@ export async function executeWorkflow({
       stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
       chatEntryTimeoutMs: parsePositiveInteger(input.chat_entry_timeout_ms, 30000),
       maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      recommendCriteria: normalizeText(input.recommend_criteria || input.criteria) || null,
+      chatCriteria: normalizeText(input.chat_criteria || input.criteria) || null,
+      operatorFilter: normalizeText(input.filter) || null,
       executeRequestResume: Boolean(input.execute_request_resume),
       config: llm.config,
       recommendProvider: llm.recommendProvider,

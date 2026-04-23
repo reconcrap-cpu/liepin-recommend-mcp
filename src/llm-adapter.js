@@ -20,10 +20,14 @@ const MODE_SCHEMAS = {
 export function buildScreeningLlmRequest({
   mode,
   screenInput,
-  config
+  config,
+  criteria = null,
+  operatorFilters = null
 }) {
   const schema = MODE_SCHEMAS[mode];
   if (!schema) throw new Error(`Unsupported screening mode: ${mode}`);
+  const normalizedCriteria = normalizeText(criteria) || null;
+  const normalizedFilters = normalizeText(operatorFilters) || null;
   return {
     provider: "openai_compatible",
     endpoint: "/chat/completions",
@@ -42,6 +46,7 @@ export function buildScreeningLlmRequest({
           "The decision field is an enum, not a sentence.",
           "Use decision=\"pass\" for accept/qualified/yes and decision=\"fail\" for reject/unqualified/no.",
           "Never use accept, reject, yes, no, or explanatory text as the decision value.",
+          "When operator_criteria is provided, treat it as mandatory screening guidance.",
           `Allowed post_action values: ${schema.postActions.join(", ")}.`
         ].join(" ")
       },
@@ -57,6 +62,8 @@ export function buildScreeningLlmRequest({
             decision: "pass",
             post_action: schema.postActions[0]
           },
+          operator_criteria: normalizedCriteria,
+          operator_filters: normalizedFilters,
           screen_input_schema: screenInput?.schemaVersion || null,
           manifest: screenInput?.manifest || null,
           candidate: screenInput?.candidate || null,
@@ -75,11 +82,19 @@ export async function runStructuredScreening({
   mode,
   screenInput,
   config,
+  criteria = null,
+  operatorFilters = null,
   provider = null,
   reasoningLogPath = null,
   fetchImpl = globalThis.fetch
 }) {
-  const request = buildScreeningLlmRequest({ mode, screenInput, config });
+  const request = buildScreeningLlmRequest({
+    mode,
+    screenInput,
+    config,
+    criteria,
+    operatorFilters
+  });
   let reasoningCaptured = false;
   const onReasoningDelta = (chunk) => {
     const text = String(chunk || "");

@@ -35,6 +35,21 @@ test("buildScreeningLlmRequest requests only structured decision fields", () => 
   assert.equal(JSON.stringify(request).includes("\"reason\""), false);
 });
 
+test("buildScreeningLlmRequest carries operator criteria and filters when provided", () => {
+  const request = buildScreeningLlmRequest({
+    mode: "chat",
+    screenInput,
+    config: {
+      model: "test-model"
+    },
+    criteria: "优先 5 年以上 Java 后端经验",
+    operatorFilters: "有简历"
+  });
+  const userPayload = JSON.parse(request.messages[1].content);
+  assert.equal(userPayload.operator_criteria, "优先 5 年以上 Java 后端经验");
+  assert.equal(userPayload.operator_filters, "有简历");
+});
+
 test("runStructuredScreening writes provider-native reasoning chunks when available", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-llm-"));
   const reasoningLogPath = path.join(tempDir, "reasoning.log");

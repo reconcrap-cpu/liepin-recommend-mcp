@@ -159,6 +159,9 @@ function createTools() {
           max_scroll_passes: { type: "integer", minimum: 1 },
           tab: { type: "string" },
           filter: { type: "string" },
+          criteria: { type: "string" },
+          recommend_criteria: { type: "string" },
+          chat_criteria: { type: "string" },
           start_index: { type: "integer", minimum: 0 },
           step_delay_ms: { type: "integer", minimum: 1 },
           chat_entry_timeout_ms: { type: "integer", minimum: 1 },
@@ -405,7 +408,8 @@ function buildStartInput(kind, args = {}) {
   const base = {
     ...args,
     debug_port: args.debug_port || DEFAULT_DEBUG_PORT,
-    mock_llm: Boolean(args.mock_llm)
+    mock_llm: Boolean(args.mock_llm),
+    criteria: args.criteria || null
   };
   if (kind === RUN_KINDS.RECOMMEND) {
     return {
@@ -413,6 +417,7 @@ function buildStartInput(kind, args = {}) {
       workflow: args.workflow || RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
       candidate_limit: args.candidate_limit || args.sample_limit || 20,
       tab: args.tab || "推荐",
+      filter: args.filter || null,
       mock_decision: args.mock_decision || "fail",
       mock_post_action: args.mock_post_action || "none"
     };
@@ -437,6 +442,9 @@ function buildStartInput(kind, args = {}) {
     start_index: args.start_index || 0,
     step_delay_ms: args.step_delay_ms || 3500,
     chat_entry_timeout_ms: args.chat_entry_timeout_ms || 30000,
+    filter: args.filter || null,
+    recommend_criteria: args.recommend_criteria || args.criteria || null,
+    chat_criteria: args.chat_criteria || args.criteria || null,
     mock_recommend_decision: args.mock_recommend_decision || args.mock_decision || "pass",
     mock_recommend_post_action: args.mock_recommend_post_action || args.mock_post_action || "chat",
     mock_chat_decision: args.mock_chat_decision || args.mock_decision || "pass",

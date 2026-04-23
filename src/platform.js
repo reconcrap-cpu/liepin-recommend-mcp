@@ -16,7 +16,8 @@ import { ensureDirSync, normalizeText, toIsoNow, writeJsonFile } from "./utils.j
 export const EXTERNAL_AGENT_CONFIG_SCHEMA_VERSION = "liepin_external_agent_config_v1";
 export const SKILL_EXPORT_SCHEMA_VERSION = "liepin_skill_export_v1";
 export const defaultSkillName = "liepin-recommend-pipeline";
-export const bundledSkillNames = [defaultSkillName];
+export const chatSkillName = "liepin-chat";
+export const bundledSkillNames = [defaultSkillName, chatSkillName];
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const packageRoot = path.resolve(path.dirname(currentFilePath), "..");

@@ -20,6 +20,8 @@ export async function runRecommendDryRunScreening({
   startIndex = 0,
   stepDelayMs = DEFAULT_RECOMMEND_STEP_DELAY_MS,
   maxPayloadChars = null,
+  criteria = null,
+  operatorFilter = null,
   config = null,
   provider = null,
   reasoningLogPath = null,
@@ -127,6 +129,8 @@ export async function runRecommendDryRunScreening({
         const screening = await runStructuredScreening({
           mode: SCREENING_MODES.RECOMMEND,
           screenInput,
+          criteria,
+          operatorFilters: operatorFilter,
           config,
           provider,
           reasoningLogPath

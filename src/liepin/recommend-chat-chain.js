@@ -37,6 +37,9 @@ export async function runRecommendChatChain({
   stepDelayMs = DEFAULT_RECOMMEND_STEP_DELAY_MS,
   chatEntryTimeoutMs = 30000,
   maxPayloadChars = null,
+  recommendCriteria = null,
+  chatCriteria = null,
+  operatorFilter = null,
   config = null,
   recommendProvider = null,
   chatProvider = null,
@@ -232,6 +235,8 @@ export async function runRecommendChatChain({
         const recommendScreening = await runStructuredScreening({
           mode: SCREENING_MODES.RECOMMEND,
           screenInput: recommendScreenInput,
+          criteria: recommendCriteria,
+          operatorFilters: operatorFilter,
           config,
           provider: recommendProvider
         });
@@ -378,6 +383,8 @@ export async function runRecommendChatChain({
         const chatScreening = await runStructuredScreening({
           mode: SCREENING_MODES.CHAT,
           screenInput: chatScreenInput,
+          criteria: chatCriteria,
+          operatorFilters: operatorFilter,
           config,
           provider: chatProvider
         });

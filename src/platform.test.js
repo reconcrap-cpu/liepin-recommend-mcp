@@ -94,6 +94,10 @@ test("runInstall syncs MCP config and skill into trae-cn targets", () => {
         fs.existsSync(path.join(traeSkillsDir, "liepin-recommend-pipeline", "SKILL.md")),
         true
       );
+      assert.equal(
+        fs.existsSync(path.join(traeSkillsDir, "liepin-chat", "SKILL.md")),
+        true
+      );
     });
   });
 });
