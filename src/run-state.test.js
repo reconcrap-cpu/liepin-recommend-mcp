@@ -9,6 +9,7 @@ import { ENV_HOME, RUN_WORKFLOWS } from "./constants.js";
 import {
   buildWorkflowArtifactPayloads,
   createRunSnapshot,
+  markRunFailed,
   markRunCompleted,
   readRunState,
   requestPause,
@@ -184,6 +185,43 @@ test("buildWorkflowArtifactPayloads prefers candidate name over generic label", 
   });
 
   assert.equal(payloads.screenInput.items[0].candidateLabel, "程女士");
+});
+
+test("markRunFailed persists partial workflow artifacts when partial result is provided", () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-run-state-"));
+  withRuntimeHome(workspaceRoot, () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: "recommend",
+      input: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING
+      }
+    });
+    const failed = markRunFailed(workspaceRoot, snapshot.run_id, {
+      code: "WORKER_UNEXPECTED_ERROR",
+      message: "test failed"
+    }, {
+      workflowResult: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+        summary: {
+          ok: false
+        },
+        result: {
+          items: [
+            {
+              index: 0,
+              rowKey: "row-1",
+              decision: { decision: "fail", post_action: "none" }
+            }
+          ]
+        }
+      }
+    });
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.artifact_summary.itemCount, 1);
+    const decisionArtifact = JSON.parse(fs.readFileSync(failed.artifacts.decisionPath, "utf8"));
+    assert.equal(decisionArtifact.decisions.length, 1);
+  });
 });
 
 function withRuntimeHome(workspaceRoot, callback) {

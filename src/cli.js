@@ -56,6 +56,12 @@ import {
 } from "./liepin/recommend-dry-run-screening.js";
 import { runProviderCheck } from "./provider-check.js";
 import {
+  exportExternalAgentConfig,
+  exportSkill,
+  runInstall,
+  runSelfHeal
+} from "./platform.js";
+import {
   runRecommendTraversalAudit,
   summarizeRecommendTraversal
 } from "./liepin/recommend-traversal.js";
@@ -98,6 +104,76 @@ export async function runCli(argv = process.argv.slice(2)) {
     return;
   }
 
+  if (command === "install") {
+    const result = runInstall({
+      workspaceRoot: getWorkspaceRoot(),
+      writeConfigTemplate: parseOptionalBoolean(
+        rootFlags["write-config-template"] || rootFlags.writeConfigTemplate,
+        true
+      ),
+      overwriteConfigTemplate: parseOptionalBoolean(
+        rootFlags["overwrite-config-template"] || rootFlags.overwriteConfigTemplate,
+        false
+      ),
+      exportExternalConfig: parseOptionalBoolean(
+        rootFlags["export-external-config"] || rootFlags.exportExternalConfig,
+        true
+      ),
+      externalConfigPath: normalizeText(
+        rootFlags["external-config-path"] || rootFlags.externalConfigPath
+      ) || null
+    });
+    printJson(result);
+    return;
+  }
+
+  if (command === "self-heal") {
+    const result = await runSelfHeal({
+      workspaceRoot: getWorkspaceRoot(),
+      port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], DEFAULT_DEBUG_PORT),
+      providerCheck: Boolean(rootFlags["provider-check"] || rootFlags.providerCheck),
+      exportExternalConfig: parseOptionalBoolean(
+        rootFlags["export-external-config"] || rootFlags.exportExternalConfig,
+        true
+      ),
+      externalConfigPath: normalizeText(
+        rootFlags["external-config-path"] || rootFlags.externalConfigPath
+      ) || null
+    });
+    printJson(result);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (command === "skill" && subcommand === "export") {
+    const result = exportSkill({
+      workspaceRoot: getWorkspaceRoot(),
+      format: normalizeText(flags.format) || "markdown",
+      outputPath: normalizeText(flags.output) || null
+    });
+    printJson(result);
+    return;
+  }
+
+  if (
+    (command === "external-agent" && subcommand === "config")
+    || (
+      command === "external-agent-config"
+      && (
+        !subcommand
+        || subcommand === "config"
+        || String(subcommand).startsWith("--")
+      )
+    )
+  ) {
+    const result = exportExternalAgentConfig({
+      workspaceRoot: getWorkspaceRoot(),
+      outputPath: normalizeText(flags.output || rootFlags.output) || null
+    });
+    printJson(result);
+    return;
+  }
+
   if (command === "research") {
     await runResearchCommand(subcommand, flags);
     return;
@@ -125,7 +201,7 @@ export async function runCli(argv = process.argv.slice(2)) {
       workspaceRoot: getWorkspaceRoot(),
       kind: command,
       mode: "async_workflow",
-      phase: "P28",
+      phase: "P29",
       input
     });
     const worker = spawnWorkerProcess({
@@ -716,6 +792,11 @@ function buildHelp() {
     "liepin-recommend-mcp commands",
     "",
     "  doctor [--debug-port 9222] [--fix] [--provider-check]",
+    "  install [--write-config-template true|false] [--overwrite-config-template] [--export-external-config true|false] [--external-config-path <path>]",
+    "  self-heal [--debug-port 9222] [--provider-check] [--export-external-config true|false] [--external-config-path <path>]",
+    "  skill export [--format markdown|json] [--output <path>]",
+    "  external-agent config [--output <path>]",
+    "  external-agent-config [--output <path>]",
     "  provider check [--mode both|recommend|chat]",
     "  recommend start [--debug-port 9222] [--candidate-limit 20] [--mock-llm]",
     "  chat start [--debug-port 9222] [--candidate-limit 20] [--filter 有简历] [--mock-llm]",

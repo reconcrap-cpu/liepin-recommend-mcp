@@ -62,6 +62,10 @@ export const LIEPIN_URLS = {
 
 export const TOOL_NAMES = {
   doctor: "liepin_doctor",
+  install: "liepin_install",
+  selfHeal: "liepin_self_heal",
+  skillExport: "liepin_skill_export",
+  externalAgentConfig: "liepin_external_agent_config",
   providerCheck: "liepin_provider_check",
   recommendStart: "liepin_recommend_start",
   chatStart: "liepin_chat_start",

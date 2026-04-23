@@ -216,37 +216,64 @@ export function markRunCompleted(workspaceRoot, runId, result = {}) {
   return next;
 }
 
-export function markRunFailed(workspaceRoot, runId, error) {
-  const next = updateRunState(workspaceRoot, runId, {
+export function markRunFailed(workspaceRoot, runId, error, { workflowResult = null } = {}) {
+  const normalizedWorkflowResult = normalizeWorkflowResultForTerminalState(workflowResult, RUN_STATES.FAILED);
+  const artifactSummary = normalizedWorkflowResult
+    ? persistRunWorkflowArtifacts(workspaceRoot, runId, normalizedWorkflowResult)
+    : null;
+  const patch = {
     state: RUN_STATES.FAILED,
     finished_at: toIsoNow(),
     stage: "failed",
     status_message: error?.message || "Run failed",
     error
-  });
+  };
+  if (artifactSummary) patch.artifact_summary = artifactSummary;
+  if (normalizedWorkflowResult) patch.result = normalizedWorkflowResult;
+  const next = updateRunState(workspaceRoot, runId, patch);
   if (next) appendRunEvent(next, "run_failed", error);
   return next;
 }
 
 export function markRunPaused(workspaceRoot, runId, result = null) {
-  const next = updateRunState(workspaceRoot, runId, {
+  const normalizedWorkflowResult = normalizeWorkflowResultForTerminalState(
+    isWorkflowResultLike(result) ? result : null,
+    RUN_STATES.PAUSED
+  );
+  const artifactSummary = normalizedWorkflowResult
+    ? persistRunWorkflowArtifacts(workspaceRoot, runId, normalizedWorkflowResult)
+    : null;
+  const patch = {
     state: RUN_STATES.PAUSED,
     stage: "paused",
     status_message: "Run paused",
     result: result || undefined
-  });
+  };
+  if (artifactSummary) patch.artifact_summary = artifactSummary;
+  if (normalizedWorkflowResult) patch.result = normalizedWorkflowResult;
+  const next = updateRunState(workspaceRoot, runId, patch);
   if (next) appendRunEvent(next, "run_paused", result || {});
   return next;
 }
 
 export function markRunCanceled(workspaceRoot, runId, result = null) {
-  const next = updateRunState(workspaceRoot, runId, {
+  const normalizedWorkflowResult = normalizeWorkflowResultForTerminalState(
+    isWorkflowResultLike(result) ? result : null,
+    RUN_STATES.CANCELED
+  );
+  const artifactSummary = normalizedWorkflowResult
+    ? persistRunWorkflowArtifacts(workspaceRoot, runId, normalizedWorkflowResult)
+    : null;
+  const patch = {
     state: RUN_STATES.CANCELED,
     finished_at: toIsoNow(),
     stage: "canceled",
     status_message: "Run canceled",
     result: result || undefined
-  });
+  };
+  if (artifactSummary) patch.artifact_summary = artifactSummary;
+  if (normalizedWorkflowResult) patch.result = normalizedWorkflowResult;
+  const next = updateRunState(workspaceRoot, runId, patch);
   if (next) appendRunEvent(next, "run_canceled", result || {});
   return next;
 }
@@ -367,4 +394,46 @@ export function buildWorkflowArtifactPayloads(workflowResult = {}) {
       }))
     }
   };
+}
+
+function isWorkflowResultLike(value) {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return false;
+  return Boolean(
+    value.workflow
+    || value.summary
+    || value.result
+    || value.schemaVersion
+    || value.items
+  );
+}
+
+function normalizeWorkflowResultForTerminalState(workflowResult, state) {
+  if (!isWorkflowResultLike(workflowResult)) return null;
+  const workflow = normalizeText(workflowResult.workflow || workflowResult.result?.workflow || "");
+  const result = normalizeResultPayload(workflowResult);
+  const summary = {
+    ...(workflowResult.summary && typeof workflowResult.summary === "object" ? workflowResult.summary : {})
+  };
+  if (!Object.hasOwn(summary, "ok")) {
+    summary.ok = state === RUN_STATES.COMPLETED;
+  }
+  if (!Object.hasOwn(summary, "terminalState")) {
+    summary.terminalState = state;
+  }
+  return {
+    workflow,
+    summary,
+    result
+  };
+}
+
+function normalizeResultPayload(workflowResult) {
+  if (workflowResult?.result && typeof workflowResult.result === "object") {
+    return workflowResult.result;
+  }
+  if (workflowResult && typeof workflowResult === "object") {
+    return workflowResult;
+  }
+  return {};
 }

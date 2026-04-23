@@ -12,6 +12,12 @@ import {
 } from "./constants.js";
 import { getWorkspaceRoot } from "./config.js";
 import { runDoctor } from "./doctor.js";
+import {
+  exportExternalAgentConfig,
+  exportSkill,
+  runInstall,
+  runSelfHeal
+} from "./platform.js";
 import { runProviderCheck } from "./provider-check.js";
 import {
   buildRunStatusPayload,
@@ -61,6 +67,60 @@ function createTools() {
           debug_port: { type: "integer", minimum: 1 },
           fix: { type: "boolean" },
           provider_check: { type: "boolean" }
+        },
+        additionalProperties: false
+      }
+    },
+    {
+      name: TOOL_NAMES.install,
+      description: "Initialize runtime layout, optional screening config template, and external agent config.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          write_config_template: { type: "boolean" },
+          overwrite_config_template: { type: "boolean" },
+          export_external_config: { type: "boolean" },
+          external_config_path: { type: "string" }
+        },
+        additionalProperties: false
+      }
+    },
+    {
+      name: TOOL_NAMES.selfHeal,
+      description: "Run install+self-heal checks and optional provider readiness verification.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          debug_port: { type: "integer", minimum: 1 },
+          provider_check: { type: "boolean" },
+          export_external_config: { type: "boolean" },
+          external_config_path: { type: "string" }
+        },
+        additionalProperties: false
+      }
+    },
+    {
+      name: TOOL_NAMES.skillExport,
+      description: "Export reusable skill guidance for external agent operators.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          format: {
+            type: "string",
+            enum: ["markdown", "json"]
+          },
+          output_path: { type: "string" }
+        },
+        additionalProperties: false
+      }
+    },
+    {
+      name: TOOL_NAMES.externalAgentConfig,
+      description: "Export an external agent MCP config for this workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          output_path: { type: "string" }
         },
         additionalProperties: false
       }
@@ -196,6 +256,45 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
       return createToolResult(id, payload, !payload.ok);
     }
 
+    if (toolName === TOOL_NAMES.install) {
+      const payload = runInstall({
+        workspaceRoot,
+        writeConfigTemplate: args.write_config_template ?? true,
+        overwriteConfigTemplate: Boolean(args.overwrite_config_template),
+        exportExternalConfig: args.export_external_config ?? true,
+        externalConfigPath: args.external_config_path || null
+      });
+      return createToolResult(id, payload, !payload.ok);
+    }
+
+    if (toolName === TOOL_NAMES.selfHeal) {
+      const payload = await runSelfHeal({
+        workspaceRoot,
+        port: args.debug_port || DEFAULT_DEBUG_PORT,
+        providerCheck: Boolean(args.provider_check),
+        exportExternalConfig: args.export_external_config ?? true,
+        externalConfigPath: args.external_config_path || null
+      });
+      return createToolResult(id, payload, !payload.ok);
+    }
+
+    if (toolName === TOOL_NAMES.skillExport) {
+      const payload = exportSkill({
+        workspaceRoot,
+        format: args.format || "markdown",
+        outputPath: args.output_path || null
+      });
+      return createToolResult(id, payload, !payload.ok);
+    }
+
+    if (toolName === TOOL_NAMES.externalAgentConfig) {
+      const payload = exportExternalAgentConfig({
+        workspaceRoot,
+        outputPath: args.output_path || null
+      });
+      return createToolResult(id, payload, !payload.ok);
+    }
+
     if (toolName === TOOL_NAMES.providerCheck) {
       const payload = await runProviderCheck({
         workspaceRoot,
@@ -270,7 +369,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
         workspaceRoot,
         kind,
         mode: "async_workflow",
-        phase: "P28",
+        phase: "P29",
         input
       });
       const worker = spawnRunWorker({

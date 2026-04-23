@@ -15,6 +15,10 @@ test("tools/list exposes liepin-prefixed tools", async () => {
     method: "tools/list"
   }, process.cwd());
   assert.equal(response.result.tools.some((tool) => tool.name === "liepin_doctor"), true);
+  assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.install), true);
+  assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.selfHeal), true);
+  assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.skillExport), true);
+  assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.externalAgentConfig), true);
   assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.providerCheck), true);
   const recommendChatTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.recommendChatStart);
   assert.equal(recommendChatTool.inputSchema.properties.allow_chat_action.type, "boolean");
@@ -86,4 +90,45 @@ test("recommend-chat start requires explicit chat approval over JSON-RPC", async
   const payload = JSON.parse(response.result.content[0].text);
   assert.equal(response.result.isError, true);
   assert.equal(payload.error.code, "SIDE_EFFECT_APPROVAL_REQUIRED");
+});
+
+test("install and export tools are callable over JSON-RPC", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
+  const previous = process.env[ENV_HOME];
+  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  try {
+    const installResponse = await handleJsonRpc({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: TOOL_NAMES.install,
+        arguments: {
+          write_config_template: true
+        }
+      }
+    }, workspaceRoot);
+    const installPayload = JSON.parse(installResponse.result.content[0].text);
+    assert.equal(installPayload.ok, true);
+
+    const exportResponse = await handleJsonRpc({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: TOOL_NAMES.externalAgentConfig,
+        arguments: {}
+      }
+    }, workspaceRoot);
+    const exportPayload = JSON.parse(exportResponse.result.content[0].text);
+    assert.equal(exportPayload.ok, true);
+    assert.equal(fs.existsSync(exportPayload.path), true);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ENV_HOME];
+    } else {
+      process.env[ENV_HOME] = previous;
+    }
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
 });

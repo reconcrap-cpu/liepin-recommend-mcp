@@ -202,6 +202,147 @@ test("runWorker persists recommend-chat chain progress emitted by executor", asy
   });
 });
 
+test("runWorker persists recommend dry-run progress emitted by executor", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.RECOMMEND,
+      phase: "P29",
+      input: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+        mock_llm: true,
+        candidate_limit: 1
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        recommendDryRun: async (_browser, { onProgress }) => {
+          onProgress({
+            stage: "candidate_completed",
+            statusMessage: "候选人已完成：候选人A",
+            progress: {
+              workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+              targetCandidates: 1,
+              processedCandidates: 1,
+              screenableCandidates: 1,
+              llmCalls: 1,
+              actionClicks: 0,
+              currentIndex: 1,
+              currentCandidateLabel: "候选人A",
+              lastItem: {
+                index: 0,
+                status: "screened"
+              }
+            },
+            partialResult: {
+              workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+              summary: {
+                ok: false
+              },
+              result: {
+                items: [
+                  { index: 0, rowKey: "row-1", status: "screened" }
+                ]
+              }
+            }
+          });
+          return {
+            passed: true,
+            dryRun: true,
+            requestedCandidateLimit: 1,
+            processedCandidates: 1,
+            screenableCandidates: 1,
+            llmCalls: 1,
+            actionClicks: 0,
+            closeAction: { closed: true },
+            violations: [],
+            items: [
+              {
+                index: 0,
+                rowKey: "row-1",
+                status: "screened",
+                coverage: { passed: true },
+                decision: { decision: "fail", post_action: "none" }
+              }
+            ]
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.progress.workflow, RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING);
+    assert.equal(stored.progress.processedCandidates, 1);
+  });
+});
+
+test("runWorker keeps partial artifacts when workflow fails after progress", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.CHAT,
+      phase: "P29",
+      input: {
+        workflow: RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING,
+        mock_llm: true,
+        candidate_limit: 1
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        chatDryRun: async (_browser, { onProgress }) => {
+          const partialResult = {
+            workflow: RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING,
+            summary: {
+              ok: false,
+              processedCandidates: 1
+            },
+            result: {
+              items: [
+                {
+                  rowIndex: 0,
+                  rowKey: "chat-row-1",
+                  status: "screened",
+                  decision: { decision: "pass", post_action: "request_resume" }
+                }
+              ]
+            }
+          };
+          onProgress({
+            stage: "candidate_completed",
+            statusMessage: "候选人已完成：chat-row-1",
+            progress: {
+              workflow: RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING,
+              targetCandidates: 1,
+              processedCandidates: 1,
+              llmCalls: 1
+            },
+            partialResult
+          });
+          const error = new Error("simulated failure");
+          error.partialResult = partialResult;
+          throw error;
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "failed");
+    assert.equal(stored.artifact_summary.itemCount, 1);
+    const screenInput = JSON.parse(fs.readFileSync(stored.artifacts.screenInputPath, "utf8"));
+    assert.equal(screenInput.items.length, 1);
+  });
+});
+
 async function withRuntimeHome(workspaceRoot, callback) {
   const previous = process.env[ENV_HOME];
   process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");

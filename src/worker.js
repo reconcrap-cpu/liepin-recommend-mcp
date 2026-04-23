@@ -60,6 +60,29 @@ export async function runWorker({
     pid: process.pid
   });
 
+  let lastPartialWorkflowResult = null;
+  const onProgress = (event = {}) => {
+    updateRunProgress(workspaceRoot, runId, event);
+    if (event.partialResult) {
+      lastPartialWorkflowResult = event.partialResult;
+    }
+    const current = readRunState(workspaceRoot, runId);
+    if (current?.control?.cancel_requested) {
+      throw createRunControlInterruptError({
+        code: "RUN_CANCELED",
+        message: "Run canceled by operator.",
+        partialResult: lastPartialWorkflowResult
+      });
+    }
+    if (current?.control?.pause_requested) {
+      throw createRunControlInterruptError({
+        code: "RUN_PAUSED",
+        message: "Run paused by operator.",
+        partialResult: lastPartialWorkflowResult
+      });
+    }
+  };
+
   try {
     if (snapshot.control?.pause_requested) {
       markRunPaused(workspaceRoot, runId, { stage: "before_browser_work" });
@@ -70,15 +93,28 @@ export async function runWorker({
       workspaceRoot,
       snapshot,
       executors,
-      onProgress: (event) => {
-        updateRunProgress(workspaceRoot, runId, event);
-      }
+      onProgress
     });
     markRunCompleted(workspaceRoot, runId, result);
   } catch (error) {
+    const partialWorkflowResult = error?.partialResult || lastPartialWorkflowResult || null;
+    if (error?.code === "RUN_PAUSED") {
+      markRunPaused(workspaceRoot, runId, partialWorkflowResult || {
+        reason: "paused_by_operator"
+      });
+      return;
+    }
+    if (error?.code === "RUN_CANCELED") {
+      markRunCanceled(workspaceRoot, runId, partialWorkflowResult || {
+        reason: "canceled_by_operator"
+      });
+      return;
+    }
     markRunFailed(workspaceRoot, runId, {
       code: error?.code || "WORKER_UNEXPECTED_ERROR",
       message: error?.message || "Unexpected worker error"
+    }, {
+      workflowResult: partialWorkflowResult
     });
   }
 }
@@ -155,7 +191,8 @@ export async function executeWorkflow({
       stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
       maxPayloadChars: parsePositiveInteger(input.max_chars, null),
       config: llm.config,
-      provider: llm.provider
+      provider: llm.provider,
+      onProgress
     });
     return {
       workflow,
@@ -172,7 +209,8 @@ export async function executeWorkflow({
       maxScrollPasses: parsePositiveInteger(input.max_scroll_passes, 3),
       conversationFilterLabel: normalizeText(input.filter) || "有简历",
       config: llm.config,
-      provider: llm.provider
+      provider: llm.provider,
+      onProgress
     });
     return {
       workflow,
@@ -318,6 +356,19 @@ function resolveRequiredConfig(workspaceRoot) {
 function parseNonNegativeInteger(value, fallback = 0) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function createRunControlInterruptError({
+  code,
+  message,
+  partialResult = null
+} = {}) {
+  const error = new Error(message || "Run control interrupted.");
+  error.code = code || "RUN_INTERRUPTED";
+  if (partialResult) {
+    error.partialResult = partialResult;
+  }
+  return error;
 }
 
 const currentFilePath = fileURLToPath(import.meta.url);

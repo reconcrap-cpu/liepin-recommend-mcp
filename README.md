@@ -12,6 +12,10 @@ npm install -g @reconcrap/liepin-recommend-mcp
 
 ```sh
 liepin-recommend-mcp doctor --json
+liepin-recommend-mcp install
+liepin-recommend-mcp self-heal --provider-check
+liepin-recommend-mcp skill export --format markdown
+liepin-recommend-mcp external-agent config
 liepin-recommend-mcp research discover --debug-port 9222
 ```
 
