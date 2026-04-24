@@ -414,24 +414,63 @@ function buildStartInput(kind, args = {}) {
   if (kind === RUN_KINDS.RECOMMEND) {
     return {
       ...base,
-      workflow: args.workflow || RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+      workflow: args.workflow || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
       candidate_limit: args.candidate_limit || args.sample_limit || 20,
+      scan_limit: args.scan_limit || null,
       tab: args.tab || "推荐",
+      start_index: args.start_index || 0,
+      step_delay_ms: args.step_delay_ms || 3500,
+      chat_entry_timeout_ms: args.chat_entry_timeout_ms || 30000,
       filter: args.filter || null,
+      recommend_criteria: args.recommend_criteria || args.criteria || null,
+      chat_criteria: args.chat_criteria || args.criteria || null,
       mock_decision: args.mock_decision || "fail",
-      mock_post_action: args.mock_post_action || "none"
+      mock_post_action: args.mock_post_action || "none",
+      mock_recommend_decision: args.mock_recommend_decision || args.mock_decision || "pass",
+      mock_recommend_post_action: args.mock_recommend_post_action || args.mock_post_action || "chat",
+      mock_chat_decision: args.mock_chat_decision || args.mock_decision || "pass",
+      mock_chat_post_action: args.mock_chat_post_action || "request_resume",
+      execute_request_resume: args.execute_request_resume === undefined
+        ? true
+        : Boolean(args.execute_request_resume),
+      allow_chat_action: args.allow_chat_action === undefined
+        ? true
+        : Boolean(args.allow_chat_action),
+      allow_request_resume: args.allow_request_resume === undefined
+        ? true
+        : Boolean(args.allow_request_resume)
     };
   }
   if (kind === RUN_KINDS.CHAT) {
     return {
       ...base,
-      workflow: args.workflow || RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING,
+      workflow: args.workflow || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
       candidate_limit: args.candidate_limit || args.sample_limit || 20,
+      scan_limit: args.scan_limit || null,
+      tab: args.tab || "推荐",
+      start_index: args.start_index || 0,
+      step_delay_ms: args.step_delay_ms || 3500,
+      chat_entry_timeout_ms: args.chat_entry_timeout_ms || 30000,
       row_limit: args.row_limit || 40,
       max_scroll_passes: args.max_scroll_passes || 3,
-      filter: args.filter || "有简历",
+      filter: args.filter || null,
+      recommend_criteria: args.recommend_criteria || args.criteria || null,
+      chat_criteria: args.chat_criteria || args.criteria || null,
       mock_decision: args.mock_decision || "fail",
-      mock_post_action: args.mock_post_action || "none"
+      mock_post_action: args.mock_post_action || "none",
+      mock_recommend_decision: args.mock_recommend_decision || args.mock_decision || "pass",
+      mock_recommend_post_action: args.mock_recommend_post_action || args.mock_post_action || "chat",
+      mock_chat_decision: args.mock_chat_decision || args.mock_decision || "pass",
+      mock_chat_post_action: args.mock_chat_post_action || "request_resume",
+      execute_request_resume: args.execute_request_resume === undefined
+        ? true
+        : Boolean(args.execute_request_resume),
+      allow_chat_action: args.allow_chat_action === undefined
+        ? true
+        : Boolean(args.allow_chat_action),
+      allow_request_resume: args.allow_request_resume === undefined
+        ? true
+        : Boolean(args.allow_request_resume)
     };
   }
   return {
@@ -449,9 +488,15 @@ function buildStartInput(kind, args = {}) {
     mock_recommend_post_action: args.mock_recommend_post_action || args.mock_post_action || "chat",
     mock_chat_decision: args.mock_chat_decision || args.mock_decision || "pass",
     mock_chat_post_action: args.mock_chat_post_action || "request_resume",
-    execute_request_resume: Boolean(args.execute_request_resume),
-    allow_chat_action: Boolean(args.allow_chat_action),
-    allow_request_resume: Boolean(args.allow_request_resume)
+    execute_request_resume: args.execute_request_resume === undefined
+      ? true
+      : Boolean(args.execute_request_resume),
+    allow_chat_action: args.allow_chat_action === undefined
+      ? true
+      : Boolean(args.allow_chat_action),
+    allow_request_resume: args.allow_request_resume === undefined
+      ? true
+      : Boolean(args.allow_request_resume)
   };
 }
 
@@ -461,7 +506,11 @@ function assertSideEffectApproval(input = {}) {
       "recommend_chat_chain 会点击推荐沟通按钮；请显式传入 allow_chat_action。"
     );
   }
-  if (input.execute_request_resume && !input.allow_request_resume) {
+  if (
+    input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
+    && input.execute_request_resume
+    && !input.allow_request_resume
+  ) {
     throw createSideEffectError(
       "execute_request_resume 会真实索要简历；请显式传入 allow_request_resume。"
     );

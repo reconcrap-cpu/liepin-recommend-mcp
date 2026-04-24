@@ -258,7 +258,11 @@ function assertSideEffectApproval(workflow, input = {}) {
       "recommend_chat_chain 会点击推荐沟通按钮；请显式传入 allow_chat_action/--allow-chat-action。"
     );
   }
-  if (input.execute_request_resume && !input.allow_request_resume) {
+  if (
+    workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
+    && input.execute_request_resume
+    && !input.allow_request_resume
+  ) {
     throw createWorkflowError(
       "SIDE_EFFECT_APPROVAL_REQUIRED",
       "execute_request_resume 会真实索要简历；请显式传入 allow_request_resume/--allow-request-resume。"

@@ -586,8 +586,10 @@ export function buildSkillExportPayload({
       providerCheck: "node src/cli.js provider check --mode both"
     },
     safety: {
-      requireAllowChatAction: true,
-      requireAllowRequestResume: true
+      allStartCommandsDefaultToRecommendChatChain: true,
+      executeRequestResumeByDefault: true,
+      requireAllowChatAction: false,
+      requireAllowRequestResume: false
     },
     tools: Object.values(TOOL_NAMES)
   };
@@ -613,8 +615,10 @@ function buildSkillExportMarkdown(payload = {}) {
     "",
     "## Safety Gates",
     "",
-    "- Real recommend chat click requires `--allow-chat-action` / `allow_chat_action=true`.",
-    "- Real request-resume click requires `--allow-request-resume` / `allow_request_resume=true`.",
+    "- `recommend/chat/recommend-chat start` 默认走正式 recommend_chat_chain。",
+    "- 默认执行真实推荐沟通点击（`allow_chat_action=true`）。",
+    "- 默认执行真实索要简历点击（`execute_request_resume=true`, `allow_request_resume=true`）。",
+    "- 如需无副作用验收，请显式使用 dry-run workflow。",
     `- External MCP target override env: \`${externalMcpTargetsEnv}\``,
     `- External skill target override env: \`${externalSkillDirsEnv}\``,
     "",

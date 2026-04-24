@@ -74,7 +74,7 @@ test("run status returns compact run payload by default", async () => {
   }
 });
 
-test("recommend-chat start requires explicit chat approval over JSON-RPC", async () => {
+test("recommend-chat start defaults to production click actions over JSON-RPC", async () => {
   const response = await handleJsonRpc({
     jsonrpc: "2.0",
     id: 3,
@@ -88,8 +88,47 @@ test("recommend-chat start requires explicit chat approval over JSON-RPC", async
     }
   }, process.cwd());
   const payload = JSON.parse(response.result.content[0].text);
-  assert.equal(response.result.isError, true);
-  assert.equal(payload.error.code, "SIDE_EFFECT_APPROVAL_REQUIRED");
+  assert.equal(response.result.isError, false);
+  assert.equal(payload.status, "ACCEPTED");
+  assert.equal(payload.workflow, RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN);
+});
+
+test("recommend start defaults to production chain over JSON-RPC", async () => {
+  const response = await handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 6,
+    method: "tools/call",
+    params: {
+      name: TOOL_NAMES.recommendStart,
+      arguments: {
+        mock_llm: true,
+        candidate_limit: 1
+      }
+    }
+  }, process.cwd());
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, false);
+  assert.equal(payload.status, "ACCEPTED");
+  assert.equal(payload.workflow, RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN);
+});
+
+test("chat start defaults to production chain over JSON-RPC", async () => {
+  const response = await handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: TOOL_NAMES.chatStart,
+      arguments: {
+        mock_llm: true,
+        candidate_limit: 1
+      }
+    }
+  }, process.cwd());
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, false);
+  assert.equal(payload.status, "ACCEPTED");
+  assert.equal(payload.workflow, RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN);
 });
 
 test("install and export tools are callable over JSON-RPC", async () => {

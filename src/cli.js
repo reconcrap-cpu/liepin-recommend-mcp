@@ -201,7 +201,8 @@ export async function runCli(argv = process.argv.slice(2)) {
     const input = parseStartInputFlags(command, flags);
     assertCliSideEffectApproval({
       needsChatAction: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
-      needsRequestResume: Boolean(input.execute_request_resume),
+      needsRequestResume: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
+        && Boolean(input.execute_request_resume),
       allowChatAction: Boolean(input.allow_chat_action),
       allowRequestResume: Boolean(input.allow_request_resume)
     });
@@ -706,9 +707,16 @@ function parseStartInputFlags(kind, flags) {
   if (kind === RUN_KINDS.RECOMMEND) {
     return {
       ...base,
-      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
       candidate_limit: base.candidate_limit || 20,
+      scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+      chat_entry_timeout_ms: parsePositiveInteger(flags["chat-entry-timeout-ms"] || flags.chatEntryTimeoutMs, 30000),
       filter: base.filter || null,
+      recommend_criteria: base.recommend_criteria || base.criteria || null,
+      chat_criteria: base.chat_criteria || base.criteria || null,
+      execute_request_resume: parseOptionalBoolean(flags["execute-request-resume"] || flags.executeRequestResume, true),
+      allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, true),
+      allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, true),
       mock_decision: base.mock_decision || "fail",
       mock_post_action: base.mock_post_action || "none"
     };
@@ -717,11 +725,18 @@ function parseStartInputFlags(kind, flags) {
   if (kind === RUN_KINDS.CHAT) {
     return {
       ...base,
-      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING,
+      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
       candidate_limit: base.candidate_limit || 20,
+      scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+      chat_entry_timeout_ms: parsePositiveInteger(flags["chat-entry-timeout-ms"] || flags.chatEntryTimeoutMs, 30000),
       row_limit: parsePositiveInteger(flags["row-limit"] || flags.rowLimit, 40),
       max_scroll_passes: parsePositiveInteger(flags["max-scroll-passes"] || flags.maxScrollPasses, 3),
-      filter: base.filter || "有简历",
+      filter: base.filter || null,
+      recommend_criteria: base.recommend_criteria || base.criteria || null,
+      chat_criteria: base.chat_criteria || base.criteria || null,
+      execute_request_resume: parseOptionalBoolean(flags["execute-request-resume"] || flags.executeRequestResume, true),
+      allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, true),
+      allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, true),
       mock_decision: base.mock_decision || "fail",
       mock_post_action: base.mock_post_action || "none"
     };
@@ -736,7 +751,9 @@ function parseStartInputFlags(kind, flags) {
     filter: base.filter || null,
     recommend_criteria: base.recommend_criteria || base.criteria || null,
     chat_criteria: base.chat_criteria || base.criteria || null,
-    execute_request_resume: parseOptionalBoolean(flags["execute-request-resume"] || flags.executeRequestResume, false),
+    execute_request_resume: parseOptionalBoolean(flags["execute-request-resume"] || flags.executeRequestResume, true),
+    allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, true),
+    allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, true),
     mock_recommend_decision: normalizeText(flags["mock-recommend-decision"] || flags.mockRecommendDecision),
     mock_recommend_post_action: normalizeText(flags["mock-recommend-post-action"] || flags.mockRecommendPostAction),
     mock_chat_decision: normalizeText(flags["mock-chat-decision"] || flags.mockChatDecision),
@@ -815,9 +832,9 @@ function buildHelp() {
     "  external-agent config [--output <path>]",
     "  external-agent-config [--output <path>]",
     "  provider check [--mode both|recommend|chat]",
-    "  recommend start [--debug-port 9222] [--candidate-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--criteria \"筛选条件\"] [--mock-llm]",
-    "  chat start [--debug-port 9222] [--candidate-limit 20] [--filter 有简历] [--criteria \"筛选条件\"] [--mock-llm]",
-    "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] --allow-chat-action [--allow-request-resume]",
+    "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
+    "  chat start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
+    "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
     "  runs list [--full]",
     "  runs status --run-id <id> [--full]",
     "  runs pause --run-id <id>",
@@ -835,7 +852,7 @@ function buildHelp() {
     "  research recommend-traversal-audit [--steps 10] [--tab 推荐] [--step-delay-ms 3500]",
     "  research recommend-dry-run-screening [--candidate-limit 20] [--tab 推荐] [--mock-llm]",
     "  research recommend-action --action none|chat [--start-index 0] [--tab 推荐] [--allow-chat-action]",
-    "  research recommend-chat-chain [--candidate-limit 5] [--scan-limit 10] [--chat-entry-timeout-ms 30000] [--mock-llm] --allow-chat-action [--allow-request-resume]",
+    "  research recommend-chat-chain [--candidate-limit 5] [--scan-limit 10] [--chat-entry-timeout-ms 30000] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
     "  research chat-scroll-audit [--filter 有简历] [--max-passes 80] [--idle-passes 3]",
     "  research chat-states --limit 20 [--filter 有简历]",
     "  research chat-sample --limit 5 [--filter 有简历]",

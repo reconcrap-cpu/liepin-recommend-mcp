@@ -24,9 +24,18 @@ liepin-recommend-mcp self-heal --provider-check
 liepin-recommend-mcp skill export --format markdown
 liepin-recommend-mcp external-agent config
 liepin-recommend-mcp research discover --debug-port 9222
+liepin-recommend-mcp recommend start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
+liepin-recommend-mcp chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
+liepin-recommend-mcp recommend-chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
 ```
 
 Chrome must already be running with a remote debugging port, for example `9222`, and the operator must be logged in to Liepin in that browser profile.
+
+`recommend/chat/recommend-chat start` now default to production behavior:
+- real recommend chat clicks are enabled by default,
+- real request-resume clicks are enabled by default.
+
+Use `--execute-request-resume false` or a dry-run workflow when you need no-side-effect validation.
 
 ## Safety Notes
 
