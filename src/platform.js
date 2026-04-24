@@ -17,7 +17,8 @@ export const EXTERNAL_AGENT_CONFIG_SCHEMA_VERSION = "liepin_external_agent_confi
 export const SKILL_EXPORT_SCHEMA_VERSION = "liepin_skill_export_v1";
 export const defaultSkillName = "liepin-recommend-pipeline";
 export const chatSkillName = "liepin-chat";
-export const bundledSkillNames = [defaultSkillName, chatSkillName];
+export const searchSkillName = "liepin-search";
+export const bundledSkillNames = [defaultSkillName, chatSkillName, searchSkillName];
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const packageRoot = path.resolve(path.dirname(currentFilePath), "..");
@@ -25,7 +26,7 @@ const packageJsonPath = path.join(packageRoot, "package.json");
 const supportedExternalAgents = ["cursor", "trae", "trae-cn", "claude", "openclaw"];
 const externalMcpTargetsEnv = "LIEPIN_MCP_CONFIG_TARGETS";
 const externalSkillDirsEnv = "LIEPIN_EXTERNAL_SKILL_DIRS";
-const liepinPackageName = "liepin-mcp";
+const liepinPackageName = "@reconcrap/liepin-mcp";
 const liepinBinaryName = "liepin-mcp";
 
 function getPackageVersion() {
@@ -46,6 +47,7 @@ function isInstalledPackageRoot(rootPath = packageRoot) {
   return (
     normalized.includes("/appdata/local/npm-cache/_npx/")
     || normalized.includes("/node_modules/liepin-mcp")
+    || normalized.includes("/node_modules/@reconcrap/liepin-mcp")
     || normalized.includes("/node_modules/@reconcrap/liepin-recommend-mcp")
   );
 }
@@ -620,6 +622,13 @@ export function buildSkillExportPayload({
       currentPageFilterLabel: "沿用页面当前筛选",
       example: "学历=本科、硕士; 年龄=22-30; 院校=985、211"
     },
+    search: {
+      mustCallOptionsBeforeStart: true,
+      optionsTool: TOOL_NAMES.searchOptions,
+      startTool: TOOL_NAMES.searchStart,
+      requiredStartArgs: ["profile", "job", "criteria", "candidate_limit"],
+      scanLimitDefault: "unset; scan until target candidates or last page"
+    },
     target: {
       candidateLimitMeansPassedCandidates: true,
       scanLimitMeansMaximumScannedCandidates: true
@@ -654,6 +663,9 @@ function buildSkillExportMarkdown(payload = {}) {
     "- 如需无副作用验收，请显式使用 dry-run workflow。",
     "- 启动推荐任务前先调用 `liepin_recommend_filter_options`，向用户展示可用筛选条件和选项。",
     "- `filter` 是猎聘页面筛选条件，不是 AI 筛选标准；示例：`学历=本科、硕士; 年龄=22-30; 院校=985、211`。",
+    "- 启动搜索任务前先调用 `liepin_search_options`，向用户展示快捷搜索 profile 和职位选项。",
+    "- 搜索任务必须确认 `profile`、`job`、`criteria`、`candidate_limit` 后再调用 `liepin_search_start`。",
+    "- 搜索任务不传 `scan_limit` 时不限制扫描上限，只受目标通过人数或最后一页限制。",
     "- `candidate_limit` 表示目标通过人选数，不是扫描或处理人数。",
     `- External MCP target override env: \`${externalMcpTargetsEnv}\``,
     `- External skill target override env: \`${externalSkillDirsEnv}\``,

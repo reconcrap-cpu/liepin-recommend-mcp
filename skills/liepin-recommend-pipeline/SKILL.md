@@ -1,13 +1,13 @@
 ---
 name: "liepin-recommend-pipeline"
-description: "Use when users want Liepin recommend-page screening or recommend->chat chaining via liepin-recommend-mcp."
+description: "Use when users want Liepin recommend-page screening or recommend->chat chaining via @reconcrap/liepin-mcp."
 ---
 
 # Liepin Recommend Pipeline Skill
 
 ## Goal
 
-当用户要在猎聘推荐页执行筛选，或要做“推荐后衔接聊天”的串联流程时，必须走 `liepin-recommend-mcp`。启动前必须确认业务参数；真实操作默认执行，不需要额外问“是否执行真实操作”。
+当用户要在猎聘推荐页执行筛选，或要做“推荐后衔接聊天”的串联流程时，必须走 `@reconcrap/liepin-mcp`。启动前必须确认业务参数；真实操作默认执行，不需要额外问“是否执行真实操作”。
 
 chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepin-chat` skill，不要在本 skill 里直接走 `liepin_chat_start`。
 

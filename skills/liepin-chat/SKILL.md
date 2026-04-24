@@ -1,6 +1,6 @@
 ---
 name: "liepin-chat"
-description: "Use when users want chat-only screening on Liepin chat page via liepin-recommend-mcp."
+description: "Use when users want chat-only screening on Liepin chat page via @reconcrap/liepin-mcp."
 ---
 
 # Liepin Chat Skill
