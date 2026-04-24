@@ -32,6 +32,7 @@ test("runWorker executes async P23 recommend dry-run workflow with injected exec
           dryRun: true,
           requestedCandidateLimit: 2,
           processedCandidates: 2,
+          passedCandidates: 2,
           screenableCandidates: 2,
           llmCalls: 2,
           actionClicks: 0,
@@ -70,7 +71,7 @@ test("runWorker executes async P23 recommend dry-run workflow with injected exec
   });
 });
 
-test("runWorker blocks recommend-chat chain without explicit chat approval", async () => {
+test("runWorker defaults recommend-chat chain to production approvals", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
   await withRuntimeHome(workspaceRoot, async () => {
     const snapshot = createRunSnapshot({
@@ -91,15 +92,21 @@ test("runWorker blocks recommend-chat chain without explicit chat approval", asy
       executors: {
         recommendChatChain: async () => {
           executorCalled = true;
-          return { passed: true, items: [] };
+          return {
+            passed: true,
+            requestedCandidateLimit: 1,
+            scannedCandidates: 1,
+            chainedCandidates: 1,
+            passedCandidates: 1,
+            items: []
+          };
         }
       }
     });
 
     const stored = readRunState(workspaceRoot, snapshot.run_id);
-    assert.equal(executorCalled, false);
-    assert.equal(stored.state, "failed");
-    assert.equal(stored.error.code, "SIDE_EFFECT_APPROVAL_REQUIRED");
+    assert.equal(executorCalled, true);
+    assert.equal(stored.state, "completed");
   });
 });
 
@@ -132,6 +139,7 @@ test("runWorker persists recommend-chat chain progress emitted by executor", asy
               currentTarget: 1,
               scannedCandidates: 0,
               chainedCandidates: 1,
+              passedCandidates: 1,
               currentCandidateLabel: "张三"
             }
           });
@@ -144,6 +152,7 @@ test("runWorker persists recommend-chat chain progress emitted by executor", asy
               currentTarget: 1,
               scannedCandidates: 1,
               chainedCandidates: 1,
+              passedCandidates: 1,
               samePageChatEntries: 1,
               screenableChatEntries: 1,
               recommendLlmCalls: 1,
@@ -163,6 +172,7 @@ test("runWorker persists recommend-chat chain progress emitted by executor", asy
             requestedCandidateLimit: 1,
             scannedCandidates: 1,
             chainedCandidates: 1,
+            passedCandidates: 1,
             samePageChatEntries: 1,
             chatPageEntries: 0,
             screenableChatEntries: 1,
@@ -255,6 +265,7 @@ test("runWorker persists recommend dry-run progress emitted by executor", async 
             dryRun: true,
             requestedCandidateLimit: 1,
             processedCandidates: 1,
+            passedCandidates: 1,
             screenableCandidates: 1,
             llmCalls: 1,
             actionClicks: 0,

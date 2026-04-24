@@ -67,6 +67,7 @@ export const TOOL_NAMES = {
   skillExport: "liepin_skill_export",
   externalAgentConfig: "liepin_external_agent_config",
   providerCheck: "liepin_provider_check",
+  recommendFilterOptions: "liepin_recommend_filter_options",
   recommendStart: "liepin_recommend_start",
   chatStart: "liepin_chat_start",
   recommendChatStart: "liepin_recommend_chat_start",

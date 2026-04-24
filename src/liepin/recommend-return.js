@@ -1,3 +1,5 @@
+import { isCdpRuntimeTimeoutError } from "../chrome.js";
+import { LIEPIN_URLS } from "../constants.js";
 import { sleep } from "../utils.js";
 import { recommendSelectors } from "./selectors.js";
 
@@ -7,6 +9,14 @@ const RECOMMEND_RETURN_KEY_EVENT = {
   windowsVirtualKeyCode: 27,
   nativeVirtualKeyCode: 27
 };
+
+const IM_MODAL_CLOSE_SELECTOR = [
+  ".ant-im-modal .ant-im-modal-close",
+  ".im-ui-recommend-chat-modal .ant-im-modal-close",
+  ".im-ui-chat-modal-container .ant-im-modal-close",
+  ".im-ui-basic-chat-modal .ant-im-modal-close",
+  ".im-ui-basic-chat-header-modal-close"
+].join(", ");
 
 export async function readRecommendReturnState(client) {
   return client.evaluate((selectors) => {
@@ -52,7 +62,16 @@ export async function closeRecommendModalToList(client, {
   timeoutMs = 10000,
   maxAttempts = 3
 } = {}) {
-  const before = await readRecommendReturnState(client);
+  let before = null;
+  try {
+    before = await readRecommendReturnState(client);
+  } catch (error) {
+    if (!isCdpRuntimeTimeoutError(error)) throw error;
+    return recoverRecommendListRuntimeTimeout(client, {
+      reason: error?.message || "runtime_timeout",
+      timeoutMs
+    });
+  }
   if (!before.hasRecommendModal && !before.hasBlockingOverlay) {
     return {
       before,
@@ -77,7 +96,16 @@ export async function clearRecommendBlockingOverlaysToList(client, {
   timeoutMs = 10000,
   maxAttempts = 3
 } = {}) {
-  const before = await readRecommendReturnState(client);
+  let before = null;
+  try {
+    before = await readRecommendReturnState(client);
+  } catch (error) {
+    if (!isCdpRuntimeTimeoutError(error)) throw error;
+    return recoverRecommendListRuntimeTimeout(client, {
+      reason: error?.message || "runtime_timeout",
+      timeoutMs
+    });
+  }
   if (!before.hasBlockingOverlay) {
     if (String(before.url || "").includes("#preview")) {
       const cleaned = await clearStaleRecommendPreviewRoute(client, {
@@ -113,6 +141,61 @@ export async function clearRecommendBlockingOverlaysToList(client, {
     timeoutMs,
     maxAttempts
   });
+}
+
+async function recoverRecommendListRuntimeTimeout(client, {
+  reason = "runtime_timeout",
+  timeoutMs = 10000
+} = {}) {
+  const result = {
+    before: null,
+    after: null,
+    clickedAny: false,
+    clickedKinds: [],
+    escapeAttempts: 0,
+    closed: false,
+    closeMethod: "cdp_recover_after_runtime_timeout",
+    reason,
+    runtimeTimedOut: true,
+    reload: null,
+    navigate: null
+  };
+  try {
+    result.reload = await client.send("Page.reload", {
+      ignoreCache: true
+    });
+    await sleep(3000);
+    await pressEscapeKey(client);
+    result.escapeAttempts += 1;
+    result.after = await waitForRecommendListState(client, {
+      timeoutMs: Math.max(timeoutMs, 10000)
+    });
+    if (result.after) {
+      result.closed = true;
+      return result;
+    }
+  } catch (error) {
+    result.reloadError = {
+      message: error?.message || String(error)
+    };
+  }
+
+  try {
+    result.navigate = await client.send("Page.navigate", {
+      url: LIEPIN_URLS.recommend
+    });
+    await sleep(3500);
+    result.after = await waitForRecommendListState(client, {
+      timeoutMs: Math.max(timeoutMs, 10000)
+    });
+    result.closed = Boolean(result.after);
+    if (!result.closed && !result.reason) result.reason = "navigate_recovery_not_closed";
+  } catch (error) {
+    result.navigateError = {
+      message: error?.message || String(error)
+    };
+  }
+  return result;
 }
 
 async function clearStaleRecommendPreviewRoute(client, {
@@ -279,7 +362,7 @@ async function finalizeRecommendClosedResult(client, {
 }
 
 async function clickRecommendCloseControls(client) {
-  return client.evaluate((selectors) => {
+  return client.evaluate((selectors, imModalCloseSelector) => {
     const isVisible = (node) => {
       if (!node) return false;
       const style = window.getComputedStyle(node);
@@ -303,7 +386,7 @@ async function clickRecommendCloseControls(client) {
     };
 
     clickNodes(
-      [...document.querySelectorAll(".ant-im-modal .ant-im-modal-close, .im-ui-recommend-chat-modal .ant-im-modal-close, .im-ui-chat-modal-container .ant-im-modal-close, .im-ui-basic-chat-modal .ant-im-modal-close")],
+      [...document.querySelectorAll(imModalCloseSelector)],
       "im_modal"
     );
     clickNodes(
@@ -319,11 +402,11 @@ async function clickRecommendCloseControls(client) {
       clickedAny: clickedKinds.length > 0,
       clickedKinds
     };
-  }, recommendSelectors);
+  }, recommendSelectors, IM_MODAL_CLOSE_SELECTOR);
 }
 
 async function clickRecommendCloseControlsByMouse(client) {
-  const targets = await client.evaluate((selectors) => {
+  const targets = await client.evaluate((selectors, imModalCloseSelector) => {
     const isVisible = (node) => {
       if (!node) return false;
       const style = window.getComputedStyle(node);
@@ -347,11 +430,11 @@ async function clickRecommendCloseControlsByMouse(client) {
       return node ? toTarget(node, kind) : null;
     };
     return [
-      pickVisible(".ant-im-modal .ant-im-modal-close, .im-ui-recommend-chat-modal .ant-im-modal-close, .im-ui-chat-modal-container .ant-im-modal-close, .im-ui-basic-chat-modal .ant-im-modal-close", "im_modal"),
+      pickVisible(imModalCloseSelector, "im_modal"),
       pickVisible(selectors.closeButton, "recommend_modal"),
       pickVisible(".ant-lpt-drawer-open .ant-lpt-drawer-close", "filter_drawer")
     ].filter(Boolean);
-  }, recommendSelectors);
+  }, recommendSelectors, IM_MODAL_CLOSE_SELECTOR);
 
   const clickedKinds = [];
   for (const target of targets) {

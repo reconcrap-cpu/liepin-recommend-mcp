@@ -148,10 +148,7 @@ export function readScreeningConfig(workspaceRoot = getWorkspaceRoot()) {
       baseUrl: normalizeText(resolution.parsed.baseUrl).replace(/\/+$/, ""),
       apiKey: normalizeText(resolution.parsed.apiKey),
       model: normalizeText(resolution.parsed.model),
-      debugPort: parsePositiveInteger(
-        process.env[ENV_DEBUG_PORT] || resolution.parsed.debugPort,
-        DEFAULT_DEBUG_PORT
-      ),
+      debugPort: resolveDefaultDebugPort(workspaceRoot),
       reasoningEffort: normalizeText(
         resolution.parsed.reasoningEffort
         || resolution.parsed.reasoning_effort
@@ -164,6 +161,14 @@ export function readScreeningConfig(workspaceRoot = getWorkspaceRoot()) {
     },
     ...resolution
   };
+}
+
+export function resolveDefaultDebugPort(workspaceRoot = getWorkspaceRoot()) {
+  const envPort = parsePositiveInteger(process.env[ENV_DEBUG_PORT], null);
+  if (envPort) return envPort;
+  const resolution = getScreeningConfigResolution(workspaceRoot);
+  const configPort = parsePositiveInteger(resolution.parsed?.debugPort, null);
+  return configPort || DEFAULT_DEBUG_PORT;
 }
 
 export function createScreeningConfigTemplate() {

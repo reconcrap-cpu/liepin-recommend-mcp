@@ -24,3 +24,24 @@ test("buildDoctorRecommendations suggests config template and Chrome launch fixe
   assert.equal(recommendations.some((item) => item.code === "CREATE_SCREENING_CONFIG"), true);
   assert.equal(recommendations.some((item) => item.code === "START_CHROME_DEBUG"), true);
 });
+
+test("buildDoctorRecommendations escalates missing chat page only when required", () => {
+  const optional = buildDoctorRecommendations({
+    chrome: {
+      ok: true,
+      pages: { chat: null }
+    },
+    port: 9223
+  });
+  const required = buildDoctorRecommendations({
+    chrome: {
+      ok: true,
+      pages: { chat: null }
+    },
+    port: 9223,
+    requireChatPage: true
+  });
+
+  assert.equal(optional.find((item) => item.code === "OPEN_CHAT_PAGE_IF_NEEDED")?.severity, "info");
+  assert.equal(required.find((item) => item.code === "OPEN_CHAT_PAGE_IF_NEEDED")?.severity, "error");
+});

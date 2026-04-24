@@ -6,6 +6,93 @@ import { clearRecommendBlockingOverlaysToList } from "./recommend-return.js";
 import { recommendSelectors } from "./selectors.js";
 
 export const RECOMMEND_FILTER_EXECUTION_SCHEMA_VERSION = "liepin_recommend_filter_execution_v1";
+export const CURRENT_PAGE_FILTER_LABELS = new Set([
+  "沿用页面当前筛选",
+  "沿用当前筛选",
+  "当前页面筛选",
+  "页面当前筛选",
+  "不额外筛选",
+  "无",
+  "none",
+  "current"
+]);
+
+export const RECOMMEND_FILTER_CATALOG = [
+  {
+    key: "graduation_year",
+    title: "毕业年份",
+    aliases: ["毕业年份", "毕业年", "届", "应届"],
+    examples: ["2026", "2025", "2024"]
+  },
+  {
+    key: "education",
+    title: "学历要求",
+    aliases: ["学历", "学历要求"],
+    examples: ["本科", "硕士", "MBA/EMBA", "博士"]
+  },
+  {
+    key: "salary_range",
+    title: "薪资范围（单选）",
+    aliases: ["薪资", "薪资范围", "月薪"],
+    examples: ["5-8K", "8-12K", "12-15K", "15-20K"]
+  },
+  {
+    key: "age",
+    title: "年龄",
+    aliases: ["年龄", "岁"],
+    examples: ["20-30", "22-28"]
+  },
+  {
+    key: "school_tier",
+    title: "院校",
+    aliases: ["院校", "学校", "学校层次"],
+    examples: ["985", "211", "双一流院校", "海外名校"]
+  },
+  {
+    key: "job_status",
+    title: "求职状态",
+    aliases: ["求职状态", "到岗", "在校", "离职", "在职"],
+    examples: ["在校，可即刻到岗"]
+  }
+];
+
+const FILTER_KEY_ALIASES = new Map([
+  ["graduation_year", "graduationYear"],
+  ["graduationyear", "graduationYear"],
+  ["graduation-year", "graduationYear"],
+  ["毕业年份", "graduationYear"],
+  ["毕业年", "graduationYear"],
+  ["education", "education"],
+  ["学历", "education"],
+  ["学历要求", "education"],
+  ["salary_range", "salaryRange"],
+  ["salaryrange", "salaryRange"],
+  ["salary-range", "salaryRange"],
+  ["薪资", "salaryRange"],
+  ["薪资范围", "salaryRange"],
+  ["月薪", "salaryRange"],
+  ["age", "age"],
+  ["年龄", "age"],
+  ["school_tier", "schoolTier"],
+  ["schooltier", "schoolTier"],
+  ["school-tier", "schoolTier"],
+  ["院校", "schoolTier"],
+  ["学校", "schoolTier"],
+  ["学校层次", "schoolTier"],
+  ["job_status", "jobStatus"],
+  ["jobstatus", "jobStatus"],
+  ["job-status", "jobStatus"],
+  ["求职状态", "jobStatus"],
+  ["到岗状态", "jobStatus"]
+]);
+
+const JOB_STATUS_OPTIONS = [
+  "在校，可即刻到岗",
+  "离职，随时到岗",
+  "在职，看看机会",
+  "在职，急寻新工作",
+  "在职，暂无跳槽打算"
+];
 
 export function buildRecommendFilterPlan({
   preset = "",
@@ -37,13 +124,54 @@ export function buildRecommendFilterPlan({
   }
 
   return [
-    buildTagAction("graduation_year", graduationYear),
-    buildTagAction("education", education),
-    buildTagAction("salary_range", salaryRange),
+    ...buildTagActions("graduation_year", graduationYear),
+    ...buildTagActions("education", education),
+    ...buildTagActions("salary_range", salaryRange),
     buildRangeAction("age", [ageMin, ageMax]),
-    buildTagAction("school_tier", schoolTier),
-    buildTagAction("job_status", jobStatus)
+    ...buildTagActions("school_tier", schoolTier),
+    ...buildTagActions("job_status", jobStatus)
   ].filter(Boolean);
+}
+
+export function describeRecommendFilterOptions(discoveredFilters = []) {
+  const discoveredByTitle = new Map(
+    (Array.isArray(discoveredFilters) ? discoveredFilters : [])
+      .map((filter) => [normalizeComparable(filter.title), filter])
+  );
+  return RECOMMEND_FILTER_CATALOG.map((catalog) => {
+    const discovered = discoveredByTitle.get(normalizeComparable(catalog.title));
+    const tags = Array.isArray(discovered?.tags)
+      ? discovered.tags.map((tag) => tag.text).filter(Boolean)
+      : [];
+    const inputPlaceholders = Array.isArray(discovered?.inputs)
+      ? discovered.inputs.map((input) => input.placeholder).filter(Boolean)
+      : [];
+    return {
+      ...catalog,
+      options: tags.length > 0 ? tags : catalog.examples,
+      inputPlaceholders
+    };
+  });
+}
+
+export function shouldApplyRecommendFilter(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return false;
+  return !CURRENT_PAGE_FILTER_LABELS.has(normalized);
+}
+
+export function buildRecommendFilterPlanFromText(value) {
+  const normalized = normalizeText(value);
+  if (!shouldApplyRecommendFilter(normalized)) return [];
+
+  const parsedObject = parseFilterObject(normalized);
+  if (parsedObject) return buildRecommendFilterPlan(normalizeFilterObject(parsedObject));
+
+  const fromAssignments = parseFilterAssignments(normalized);
+  const extracted = Object.keys(fromAssignments).length > 0
+    ? fromAssignments
+    : extractFiltersFromFreeText(normalized);
+  return buildRecommendFilterPlan(extracted);
 }
 
 export async function executeRecommendFilters({
@@ -165,16 +293,137 @@ export function evaluateRecommendFilterExecution(result) {
   };
 }
 
-function buildTagAction(key, option) {
+function buildTagActions(key, option) {
   const spec = RECOMMEND_FILTER_SPECS.find((candidate) => candidate.key === key);
-  const normalizedOption = normalizeText(option);
-  if (!spec || !normalizedOption) return null;
-  return {
+  const normalizedOptions = splitFilterOptions(option);
+  if (!spec || normalizedOptions.length === 0) return [];
+  return normalizedOptions.map((normalizedOption) => ({
     key: spec.key,
     title: spec.title,
     type: spec.type,
     option: normalizedOption
-  };
+  }));
+}
+
+function splitFilterOptions(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return [];
+  return normalized
+    .split(/、+/u)
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
+}
+
+function parseFilterObject(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFilterObject(value = {}) {
+  const normalized = {};
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const key = FILTER_KEY_ALIASES.get(normalizeComparable(rawKey)) || rawKey;
+    if (key === "age" && rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+      normalized.ageMin = normalizeText(rawValue.min ?? rawValue.minimum ?? rawValue.from);
+      normalized.ageMax = normalizeText(rawValue.max ?? rawValue.maximum ?? rawValue.to);
+      continue;
+    }
+    if (key === "age" && Array.isArray(rawValue)) {
+      normalized.ageMin = normalizeText(rawValue[0]);
+      normalized.ageMax = normalizeText(rawValue[1]);
+      continue;
+    }
+    normalized[key] = Array.isArray(rawValue)
+      ? rawValue.map((item) => normalizeText(item)).filter(Boolean).join("、")
+      : normalizeText(rawValue);
+  }
+  return normalized;
+}
+
+function parseFilterAssignments(value) {
+  const result = {};
+  const parts = value
+    .split(/[;\n；]+/u)
+    .map((part) => normalizeText(part))
+    .filter(Boolean);
+  for (const part of parts) {
+    const match = part.match(/^([^:=：=]+)\s*[:=：]\s*(.+)$/u);
+    if (!match) continue;
+    const key = FILTER_KEY_ALIASES.get(normalizeComparable(match[1]));
+    if (!key) continue;
+    if (key === "age") {
+      const age = parseAgeRange(match[2]);
+      result.ageMin = age.ageMin;
+      result.ageMax = age.ageMax;
+      continue;
+    }
+    result[key] = normalizeText(match[2]);
+  }
+  return result;
+}
+
+function extractFiltersFromFreeText(value) {
+  const result = {};
+  const graduationYears = [...value.matchAll(/(?:^|[^\d])((?:20)?\d{2})\s*(?:届|毕业)?/gu)]
+    .map((match) => normalizeYear(match[1]))
+    .filter(Boolean)
+    .filter((year) => Number.parseInt(year, 10) >= 2020 && Number.parseInt(year, 10) <= 2035);
+  if (graduationYears.length > 0 && /届|毕业|应届/u.test(value)) {
+    result.graduationYear = dedupe(graduationYears).join("、");
+  }
+
+  const educationOptions = ["MBA/EMBA", "博士", "硕士", "本科", "大专"];
+  const education = educationOptions.filter((option) => value.includes(option));
+  if (education.length > 0) result.education = education.join("、");
+
+  const salary = value.match(/(\d+(?:\.\d+)?)\s*[-~至到]\s*(\d+(?:\.\d+)?)\s*[kK]/u);
+  if (salary) {
+    result.salaryRange = `${salary[1]}-${salary[2]}K`;
+  }
+
+  const age = parseAgeRange(value);
+  if (age.ageMin || age.ageMax) {
+    result.ageMin = age.ageMin;
+    result.ageMax = age.ageMax;
+  }
+
+  const schoolTier = [];
+  if (value.includes("985")) schoolTier.push("985");
+  if (value.includes("211")) schoolTier.push("211");
+  if (value.includes("双一流")) schoolTier.push("双一流院校");
+  if (value.includes("海外名校")) schoolTier.push("海外名校");
+  if (schoolTier.length > 0) result.schoolTier = dedupe(schoolTier).join("、");
+
+  const jobStatus = JOB_STATUS_OPTIONS.filter((option) => value.includes(option));
+  if (jobStatus.length > 0) {
+    result.jobStatus = jobStatus.join("、");
+  } else if (/在校.*即刻|即刻.*到岗/u.test(value)) {
+    result.jobStatus = "在校，可即刻到岗";
+  }
+
+  return result;
+}
+
+function parseAgeRange(value) {
+  const text = normalizeText(value);
+  const range = text.match(/(?:年龄)?\s*(\d{1,2})\s*(?:-|~|至|到)\s*(\d{1,2})\s*岁?/u);
+  if (range) return { ageMin: range[1], ageMax: range[2] };
+  const under = text.match(/(?:年龄)?\s*(\d{1,2})\s*岁?(?:以下|以内|内)/u);
+  if (under) return { ageMin: "", ageMax: under[1] };
+  const over = text.match(/(?:年龄)?\s*(\d{1,2})\s*岁?(?:以上|起)/u);
+  if (over) return { ageMin: over[1], ageMax: "" };
+  return { ageMin: "", ageMax: "" };
+}
+
+function normalizeYear(value) {
+  const text = normalizeText(value);
+  if (/^\d{2}$/u.test(text)) return `20${text}`;
+  if (/^20\d{2}$/u.test(text)) return text;
+  return "";
 }
 
 function buildRangeAction(key, values) {
@@ -187,6 +436,14 @@ function buildRangeAction(key, values) {
     type: spec.type,
     values: normalizedValues
   };
+}
+
+function normalizeComparable(value) {
+  return normalizeText(value).replace(/\s+/gu, "").toLowerCase();
+}
+
+function dedupe(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 async function applyRecommendFilterPlan(client, plan) {

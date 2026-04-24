@@ -34,6 +34,7 @@ test("evaluateRecommendDryRunScreening passes complete dry-run result", () => {
     dryRun: true,
     requestedCandidateLimit: 2,
     processedCandidates: 2,
+    passedCandidates: 2,
     llmCalls: 2,
     actionClicks: 0,
     closeAction: { closed: true },
@@ -44,7 +45,7 @@ test("evaluateRecommendDryRunScreening passes complete dry-run result", () => {
         textHash: "a",
         actionExecuted: false,
         coverage: { passed: true },
-        decision: { decision: "fail", post_action: "none" }
+        decision: { decision: "pass", post_action: "chat" }
       },
       {
         index: 1,
@@ -69,6 +70,7 @@ test("summarizeRecommendDryRunScreening reports dry-run safety counters", () => 
     dryRun: true,
     requestedCandidateLimit: 20,
     processedCandidates: 20,
+    passedCandidates: 20,
     screenableCandidates: 20,
     llmCalls: 20,
     actionClicks: 0,
@@ -86,7 +88,9 @@ test("summarizeRecommendDryRunScreening reports dry-run safety counters", () => 
   assert.deepEqual(summary, {
     ok: true,
     dryRun: true,
+    requestedCandidateLimit: 20,
     processedCandidates: 20,
+    passedCandidates: 20,
     screenableCandidates: 20,
     llmCalls: 20,
     actionClicks: 0,

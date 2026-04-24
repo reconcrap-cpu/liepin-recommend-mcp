@@ -58,6 +58,10 @@ function getDefaultMcpPackageSpecifier(options = {}) {
   return `${liepinPackageName}@latest`;
 }
 
+function getLocalSourceLaunchArgs() {
+  return [path.join(packageRoot, "bin", "liepin-recommend-mcp.js"), "start"];
+}
+
 function getCodexHome() {
   return process.env.CODEX_HOME
     ? path.resolve(process.env.CODEX_HOME)
@@ -187,10 +191,14 @@ function parseAgentTargets(rawValue) {
 }
 
 function buildExternalMcpLaunchConfig(options = {}) {
-  const command = normalizeText(options.command) || "npx";
+  const explicitCommand = normalizeText(options.command);
+  const useLocalSource = !explicitCommand && !isInstalledPackageRoot(options.packageRootPath || packageRoot);
+  const command = explicitCommand || (useLocalSource ? "node" : "npx");
   const explicitArgs = options.args;
   const launchArgs = Array.isArray(explicitArgs) && explicitArgs.length > 0
     ? explicitArgs
+    : useLocalSource
+      ? getLocalSourceLaunchArgs()
     : command === liepinBinaryName
       ? ["start"]
       : ["-y", getDefaultMcpPackageSpecifier(options), "start"];
@@ -198,8 +206,18 @@ function buildExternalMcpLaunchConfig(options = {}) {
     command,
     args: launchArgs
   };
-  if (options.env && typeof options.env === "object" && !Array.isArray(options.env)) {
-    launchConfig.env = options.env;
+  const resolvedWorkspaceRoot = normalizeText(options.workspaceRoot || options.workspace_root)
+    ? path.resolve(options.workspaceRoot || options.workspace_root)
+    : null;
+  const explicitEnv = options.env && typeof options.env === "object" && !Array.isArray(options.env)
+    ? options.env
+    : null;
+  const launchEnv = {
+    ...(resolvedWorkspaceRoot ? { LIEPIN_WORKSPACE_ROOT: resolvedWorkspaceRoot } : {}),
+    ...(explicitEnv || {})
+  };
+  if (Object.keys(launchEnv).length > 0) {
+    launchConfig.env = launchEnv;
   }
   return launchConfig;
 }
@@ -413,7 +431,7 @@ export function runInstall({
   const layout = ensureRuntimeLayout(workspaceRoot);
   const fixes = [];
   const skillInstall = installSkill();
-  const externalMcpConfigs = installExternalMcpConfigs({ agent });
+  const externalMcpConfigs = installExternalMcpConfigs({ agent, workspaceRoot: layout.workspaceRoot });
   const externalSkillInstall = mirrorSkillToExternalDirs({ agent });
 
   if (writeConfigTemplate) {
@@ -463,6 +481,7 @@ export async function runSelfHeal({
   workspaceRoot,
   port = DEFAULT_DEBUG_PORT,
   providerCheck = false,
+  requireChatPage = false,
   exportExternalConfig = true,
   externalConfigPath = null,
   agent = null
@@ -479,7 +498,8 @@ export async function runSelfHeal({
     workspaceRoot,
     port,
     fix: true,
-    providerCheck
+    providerCheck,
+    requireChatPage
   });
   return {
     ok: doctor.ok,
@@ -501,6 +521,7 @@ export function buildExternalAgentConfig({
     command,
     args,
     env,
+    workspaceRoot: workspace,
     packageVersion
   });
   return {
@@ -591,6 +612,17 @@ export function buildSkillExportPayload({
       requireAllowChatAction: false,
       requireAllowRequestResume: false
     },
+    filters: {
+      mustAskUserBeforeStart: true,
+      optionsTool: TOOL_NAMES.recommendFilterOptions,
+      filterMeansPageConditionsNotCriteria: true,
+      currentPageFilterLabel: "沿用页面当前筛选",
+      example: "学历=本科、硕士; 年龄=22-30; 院校=985、211"
+    },
+    target: {
+      candidateLimitMeansPassedCandidates: true,
+      scanLimitMeansMaximumScannedCandidates: true
+    },
     tools: Object.values(TOOL_NAMES)
   };
 }
@@ -619,6 +651,9 @@ function buildSkillExportMarkdown(payload = {}) {
     "- 默认执行真实推荐沟通点击（`allow_chat_action=true`）。",
     "- 默认执行真实索要简历点击（`execute_request_resume=true`, `allow_request_resume=true`）。",
     "- 如需无副作用验收，请显式使用 dry-run workflow。",
+    "- 启动推荐任务前先调用 `liepin_recommend_filter_options`，向用户展示可用筛选条件和选项。",
+    "- `filter` 是猎聘页面筛选条件，不是 AI 筛选标准；示例：`学历=本科、硕士; 年龄=22-30; 院校=985、211`。",
+    "- `candidate_limit` 表示目标通过人选数，不是扫描或处理人数。",
     `- External MCP target override env: \`${externalMcpTargetsEnv}\``,
     `- External skill target override env: \`${externalSkillDirsEnv}\``,
     "",

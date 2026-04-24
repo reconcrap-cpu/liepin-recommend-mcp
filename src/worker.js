@@ -32,6 +32,11 @@ import {
   summarizeRecommendDryRunScreening
 } from "./liepin/recommend-dry-run-screening.js";
 import {
+  buildRecommendFilterPlanFromText,
+  executeRecommendFilters,
+  shouldApplyRecommendFilter
+} from "./liepin/recommend-filter-executor.js";
+import {
   runRecommendChatChain,
   summarizeRecommendChatChain
 } from "./liepin/recommend-chat-chain.js";
@@ -186,6 +191,7 @@ export async function executeWorkflow({
     const llm = resolveRecommendDryRunLlm(workspaceRoot, input);
     const result = await executors.recommendDryRun({ port }, {
       candidateLimit: parsePositiveInteger(input.candidate_limit, parsePositiveInteger(input.sample_limit, 20)),
+      scanLimit: parsePositiveInteger(input.scan_limit, null),
       tabLabel: normalizeText(input.tab) || "推荐",
       startIndex: parseNonNegativeInteger(input.start_index, 0),
       stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
@@ -224,6 +230,20 @@ export async function executeWorkflow({
 
   if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN) {
     const llm = resolveRecommendChatChainLlm(workspaceRoot, input);
+    const filterPlan = buildRecommendFilterPlanFromText(input.filter);
+    let filterExecution = null;
+    if (shouldApplyRecommendFilter(input.filter) && filterPlan.length > 0) {
+      filterExecution = await executors.recommendFilters({ port }, {
+        plan: filterPlan,
+        restore: false
+      });
+      if (!filterExecution?.passed) {
+        throw createWorkflowError(
+          "RECOMMEND_FILTER_APPLY_FAILED",
+          `推荐页筛选条件应用失败：${JSON.stringify(filterExecution?.actions || filterExecution || {})}`
+        );
+      }
+    }
     const result = await executors.recommendChatChain({ port }, {
       candidateLimit: parsePositiveInteger(input.candidate_limit, 5),
       scanLimit: parsePositiveInteger(input.scan_limit, null),
@@ -241,6 +261,9 @@ export async function executeWorkflow({
       chatProvider: llm.chatProvider,
       onProgress
     });
+    if (filterExecution) {
+      result.filterExecution = filterExecution;
+    }
     return {
       workflow,
       summary: summarizeRecommendChatChain(result),
@@ -252,20 +275,22 @@ export async function executeWorkflow({
 }
 
 function assertSideEffectApproval(workflow, input = {}) {
-  if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN && !input.allow_chat_action) {
+  const allowChatAction = input.allow_chat_action ?? true;
+  const allowRequestResume = input.allow_request_resume ?? true;
+  if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN && !allowChatAction) {
     throw createWorkflowError(
       "SIDE_EFFECT_APPROVAL_REQUIRED",
-      "recommend_chat_chain 会点击推荐沟通按钮；请显式传入 allow_chat_action/--allow-chat-action。"
+      "recommend_chat_chain 会点击推荐沟通按钮；如需正式串联请允许 allow_chat_action，或改用 dry-run workflow。"
     );
   }
   if (
     workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
     && input.execute_request_resume
-    && !input.allow_request_resume
+    && !allowRequestResume
   ) {
     throw createWorkflowError(
       "SIDE_EFFECT_APPROVAL_REQUIRED",
-      "execute_request_resume 会真实索要简历；请显式传入 allow_request_resume/--allow-request-resume。"
+      "execute_request_resume 会真实索要简历；如需索要简历请允许 allow_request_resume，或关闭 execute_request_resume。"
     );
   }
 }
@@ -283,6 +308,7 @@ export function createDefaultExecutors() {
     cvSurvey: runCvStructureSurvey,
     recommendDryRun: runRecommendDryRunScreening,
     chatDryRun: runChatDryRunScreening,
+    recommendFilters: executeRecommendFilters,
     recommendChatChain: runRecommendChatChain
   };
 }

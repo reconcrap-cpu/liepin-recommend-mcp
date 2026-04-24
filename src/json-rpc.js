@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_DEBUG_PORT,
@@ -10,7 +11,7 @@ import {
   SERVER_VERSION,
   TOOL_NAMES
 } from "./constants.js";
-import { getWorkspaceRoot } from "./config.js";
+import { getWorkspaceRoot, resolveDefaultDebugPort } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import {
   exportExternalAgentConfig,
@@ -20,6 +21,11 @@ import {
 } from "./platform.js";
 import { runProviderCheck } from "./provider-check.js";
 import {
+  discoverRecommendFilters,
+  summarizeRecommendFilterDiscovery
+} from "./liepin/recommend-filter-discovery.js";
+import { describeRecommendFilterOptions } from "./liepin/recommend-filter-executor.js";
+import {
   buildRunStatusPayload,
   clearPauseRequest,
   createRunSnapshot,
@@ -28,6 +34,10 @@ import {
   requestCancel,
   requestPause
 } from "./run-state.js";
+import { parsePositiveInteger } from "./utils.js";
+
+const currentFilePath = fileURLToPath(import.meta.url);
+const workerScriptPath = path.join(path.dirname(currentFilePath), "worker.js");
 
 function createToolResult(id, payload, isError = false) {
   return {
@@ -60,13 +70,14 @@ function createTools() {
   return [
     {
       name: TOOL_NAMES.doctor,
-      description: "Run liepin environment checks for config, Chrome 9222, and page discovery.",
+      description: "Run liepin environment checks for config, configured Chrome debug port, and page discovery.",
       inputSchema: {
         type: "object",
         properties: {
           debug_port: { type: "integer", minimum: 1 },
           fix: { type: "boolean" },
-          provider_check: { type: "boolean" }
+          provider_check: { type: "boolean" },
+          require_chat_page: { type: "boolean" }
         },
         additionalProperties: false
       }
@@ -94,6 +105,7 @@ function createTools() {
         properties: {
           debug_port: { type: "integer", minimum: 1 },
           provider_check: { type: "boolean" },
+          require_chat_page: { type: "boolean" },
           export_external_config: { type: "boolean" },
           external_config_path: { type: "string" },
           agent: { type: "string" }
@@ -141,24 +153,56 @@ function createTools() {
         additionalProperties: false
       }
     },
+    {
+      name: TOOL_NAMES.recommendFilterOptions,
+      description: [
+        "List available Liepin recommend-page filter fields and options for the operator.",
+        "Call this before asking the user for the `filter` argument of a recommend/recommend-chat start task.",
+        "The `filter` argument is page filter conditions, not LLM screening criteria."
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        properties: {
+          debug_port: { type: "integer", minimum: 1 },
+          verify: { type: "boolean" }
+        },
+        additionalProperties: false
+      }
+    },
     ...Object.entries({
       [TOOL_NAMES.recommendStart]: RUN_KINDS.RECOMMEND,
       [TOOL_NAMES.chatStart]: RUN_KINDS.CHAT,
       [TOOL_NAMES.recommendChatStart]: RUN_KINDS.RECOMMEND_CHAT
     }).map(([name]) => ({
       name,
-      description: `Create an async ${name} run in the current implementation stage.`,
+      description: [
+        `Create an async ${name} run in the current implementation stage.`,
+        "`candidate_limit` means the target number of candidates that pass screening, not the number scanned or processed.",
+        "`filter` means Liepin page filter conditions. Before starting, ask the user to choose from liepin_recommend_filter_options; pass JSON or natural language such as 学历=本科、硕士; 年龄=22-30; 院校=985、211. Use 沿用页面当前筛选 only when the user explicitly wants current page filters.",
+        "Production chat/request-resume actions default to enabled; do not ask for an extra real-operation confirmation unless the user asks to disable actions."
+      ].join(" "),
       inputSchema: {
         type: "object",
         properties: {
           debug_port: { type: "integer", minimum: 1 },
           sample_limit: { type: "integer", minimum: 1 },
-          candidate_limit: { type: "integer", minimum: 1 },
-          scan_limit: { type: "integer", minimum: 1 },
+          candidate_limit: {
+            type: "integer",
+            minimum: 1,
+            description: "Target number of candidates that pass screening."
+          },
+          scan_limit: {
+            type: "integer",
+            minimum: 1,
+            description: "Optional maximum candidates to scan while trying to reach candidate_limit passed candidates."
+          },
           row_limit: { type: "integer", minimum: 1 },
           max_scroll_passes: { type: "integer", minimum: 1 },
           tab: { type: "string" },
-          filter: { type: "string" },
+          filter: {
+            type: "string",
+            description: "Liepin page filters, not screening criteria. Supports JSON or natural language. Examples: 沿用页面当前筛选; 学历=本科、硕士; 年龄=22-30; 院校=985、211."
+          },
           criteria: { type: "string" },
           recommend_criteria: { type: "string" },
           chat_criteria: { type: "string" },
@@ -207,7 +251,10 @@ function createTools() {
   ];
 }
 
-export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot()) {
+export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(), {
+  spawnWorker = spawnRunWorker
+} = {}) {
+  const defaultDebugPort = resolveDefaultDebugPort(workspaceRoot);
   if (!message || message.jsonrpc !== "2.0") {
     return createError(null, -32600, "Invalid JSON-RPC request");
   }
@@ -254,9 +301,10 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
     if (toolName === TOOL_NAMES.doctor) {
       const payload = await runDoctor({
         workspaceRoot,
-        port: args.debug_port || DEFAULT_DEBUG_PORT,
+        port: parsePositiveInteger(args.debug_port, defaultDebugPort),
         fix: Boolean(args.fix),
-        providerCheck: Boolean(args.provider_check)
+        providerCheck: Boolean(args.provider_check),
+        requireChatPage: Boolean(args.require_chat_page)
       });
       return createToolResult(id, payload, !payload.ok);
     }
@@ -276,8 +324,9 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
     if (toolName === TOOL_NAMES.selfHeal) {
       const payload = await runSelfHeal({
         workspaceRoot,
-        port: args.debug_port || DEFAULT_DEBUG_PORT,
+        port: parsePositiveInteger(args.debug_port, defaultDebugPort),
         providerCheck: Boolean(args.provider_check),
+        requireChatPage: Boolean(args.require_chat_page),
         exportExternalConfig: args.export_external_config ?? true,
         externalConfigPath: args.external_config_path || null,
         agent: args.agent || null
@@ -308,6 +357,28 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
         mode: args.mode || "both"
       });
       return createToolResult(id, payload, !payload.ok);
+    }
+
+    if (toolName === TOOL_NAMES.recommendFilterOptions) {
+      const discovery = await discoverRecommendFilters({
+        port: parsePositiveInteger(args.debug_port, defaultDebugPort)
+      }, {
+        verify: args.verify ?? false
+      });
+      const payload = {
+        status: "OK",
+        summary: summarizeRecommendFilterDiscovery(discovery),
+        filterUsage: {
+          currentPageFilterLabel: "沿用页面当前筛选",
+          examples: [
+            "学历=本科、硕士; 年龄=22-30; 院校=985、211",
+            "{\"education\":[\"本科\",\"硕士\"],\"age\":{\"min\":22,\"max\":30},\"school_tier\":[\"985\",\"211\"]}"
+          ]
+        },
+        filters: describeRecommendFilterOptions(discovery.filters),
+        discovery
+      };
+      return createToolResult(id, payload, !discovery.passed && args.verify === true);
     }
 
     if (toolName === TOOL_NAMES.runStatus) {
@@ -353,7 +424,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
         }, true);
       }
       clearPauseRequest(workspaceRoot, args.run_id);
-      const worker = spawnRunWorker({
+      const worker = spawnWorker({
         workspaceRoot,
         runId: args.run_id
       });
@@ -370,7 +441,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
       [TOOL_NAMES.recommendChatStart]: RUN_KINDS.RECOMMEND_CHAT
     }[toolName];
     if (kind) {
-      const input = buildStartInput(kind, args);
+      const input = buildStartInput(kind, args, defaultDebugPort);
       assertSideEffectApproval(input);
       const snapshot = createRunSnapshot({
         workspaceRoot,
@@ -379,7 +450,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
         phase: "P29",
         input
       });
-      const worker = spawnRunWorker({
+      const worker = spawnWorker({
         workspaceRoot,
         runId: snapshot.run_id
       });
@@ -404,10 +475,10 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot())
   }
 }
 
-function buildStartInput(kind, args = {}) {
+function buildStartInput(kind, args = {}, defaultDebugPort = DEFAULT_DEBUG_PORT) {
   const base = {
     ...args,
-    debug_port: args.debug_port || DEFAULT_DEBUG_PORT,
+    debug_port: parsePositiveInteger(args.debug_port, defaultDebugPort),
     mock_llm: Boolean(args.mock_llm),
     criteria: args.criteria || null
   };
@@ -527,7 +598,7 @@ function spawnRunWorker({ workspaceRoot, runId }) {
   const child = spawn(
     process.execPath,
     [
-      path.join(workspaceRoot, "src", "worker.js"),
+      workerScriptPath,
       "--run-id",
       runId,
       "--workspace-root",

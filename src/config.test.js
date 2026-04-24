@@ -6,7 +6,12 @@ import path from "node:path";
 import process from "node:process";
 
 import { ENV_HOME } from "./constants.js";
-import { readScreeningConfig, validateScreeningConfig, writeScreeningConfigTemplate } from "./config.js";
+import {
+  readScreeningConfig,
+  resolveDefaultDebugPort,
+  validateScreeningConfig,
+  writeScreeningConfigTemplate
+} from "./config.js";
 
 test("validateScreeningConfig rejects placeholder config", () => {
   const result = validateScreeningConfig({
@@ -73,6 +78,54 @@ test("readScreeningConfig accepts boss-style llmThinkingLevel", () => {
     assert.equal(resolution.config.reasoningEffort, "low");
     assert.equal(resolution.config.llmSchemaMaxRetries, 1);
   } finally {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("resolveDefaultDebugPort prefers screening-config debugPort", () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-config-"));
+  const configDir = path.join(workspaceRoot, "config");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "screening-config.json"), JSON.stringify({
+    baseUrl: "https://example.com/v1",
+    apiKey: "sk-test",
+    model: "test-model",
+    debugPort: 9223
+  }), "utf8");
+  const previous = process.env.LIEPIN_DEBUG_PORT;
+  delete process.env.LIEPIN_DEBUG_PORT;
+  try {
+    assert.equal(resolveDefaultDebugPort(workspaceRoot), 9223);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.LIEPIN_DEBUG_PORT;
+    } else {
+      process.env.LIEPIN_DEBUG_PORT = previous;
+    }
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("resolveDefaultDebugPort lets env override screening-config debugPort", () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-config-"));
+  const configDir = path.join(workspaceRoot, "config");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "screening-config.json"), JSON.stringify({
+    baseUrl: "https://example.com/v1",
+    apiKey: "sk-test",
+    model: "test-model",
+    debugPort: 9223
+  }), "utf8");
+  const previous = process.env.LIEPIN_DEBUG_PORT;
+  process.env.LIEPIN_DEBUG_PORT = "9333";
+  try {
+    assert.equal(resolveDefaultDebugPort(workspaceRoot), 9333);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.LIEPIN_DEBUG_PORT;
+    } else {
+      process.env.LIEPIN_DEBUG_PORT = previous;
+    }
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
   }
 });

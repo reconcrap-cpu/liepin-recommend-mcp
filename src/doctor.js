@@ -16,7 +16,8 @@ export async function runDoctor({
   workspaceRoot,
   port = DEFAULT_DEBUG_PORT,
   fix = false,
-  providerCheck = false
+  providerCheck = false,
+  requireChatPage = false
 } = {}) {
   const layout = ensureRuntimeLayout(workspaceRoot);
   const fixes = [];
@@ -94,8 +95,14 @@ export async function runDoctor({
     });
     checks.push({
       key: "liepin_chat_page",
-      ok: Boolean(chrome.pages.chat),
-      message: chrome.pages.chat ? chrome.pages.chat.url : "Chat page not found"
+      ok: Boolean(chrome.pages.chat) || !requireChatPage,
+      required: Boolean(requireChatPage),
+      found: Boolean(chrome.pages.chat),
+      message: chrome.pages.chat
+        ? chrome.pages.chat.url
+        : requireChatPage
+          ? "Chat page not found"
+          : "Chat page not found; required only for chat-only workflows"
     });
   }
 
@@ -104,7 +111,8 @@ export async function runDoctor({
     chrome,
     screenConfig,
     layout,
-    port
+    port,
+    requireChatPage
   });
 
   return {
@@ -125,7 +133,8 @@ export function buildDoctorRecommendations({
   chrome = null,
   screenConfig = null,
   layout = null,
-  port = DEFAULT_DEBUG_PORT
+  port = DEFAULT_DEBUG_PORT,
+  requireChatPage = false
 } = {}) {
   const byKey = new Map(checks.map((check) => [check.key, check]));
   const recommendations = [];
@@ -179,15 +188,15 @@ export function buildDoctorRecommendations({
     recommendations.push({
       code: "OPEN_RECOMMEND_PAGE",
       severity: "warning",
-      message: "Open the Liepin recommend page in the Chrome 9222 session.",
+      message: `Open the Liepin recommend page in the Chrome ${port} session.`,
       url: "https://lpt.liepin.com/recommend"
     });
   }
   if (chrome?.ok && !chrome.pages?.chat) {
     recommendations.push({
       code: "OPEN_CHAT_PAGE_IF_NEEDED",
-      severity: "info",
-      message: "Open the Liepin chat page before chat-only workflows.",
+      severity: requireChatPage ? "error" : "info",
+      message: `Open the Liepin chat page in the Chrome ${port} session before chat-only workflows.`,
       url: "https://lpt.liepin.com/chat/im"
     });
   }

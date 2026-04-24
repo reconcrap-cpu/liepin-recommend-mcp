@@ -16,6 +16,7 @@ export async function runRecommendDryRunScreening({
   port = DEFAULT_DEBUG_PORT
 } = {}, {
   candidateLimit = 20,
+  scanLimit = null,
   tabLabel = "推荐",
   startIndex = 0,
   stepDelayMs = DEFAULT_RECOMMEND_STEP_DELAY_MS,
@@ -27,6 +28,8 @@ export async function runRecommendDryRunScreening({
   reasoningLogPath = null,
   onProgress = null
 } = {}) {
+  const requestedCandidateLimit = Math.max(1, candidateLimit);
+  const requestedScanLimit = Math.max(requestedCandidateLimit, scanLimit || requestedCandidateLimit * 10);
   const pages = await discoverLiepinPages({ port });
   if (!pages.recommend && pages.riskPage) {
     throw new Error(`检测到猎聘风控/验证码页，已停止推荐 dry-run screening：${pages.riskPage.url}`);
@@ -41,9 +44,12 @@ export async function runRecommendDryRunScreening({
     const seenTextHashes = new Set();
     const violations = [];
     let llmCalls = 0;
+    let passedCandidates = 0;
     const progressState = {
-      targetCandidates: candidateLimit,
+      targetCandidates: requestedCandidateLimit,
+      scanLimit: requestedScanLimit,
       processedCandidates: 0,
+      passedCandidates: 0,
       screenableCandidates: 0,
       llmCalls: 0,
       actionClicks: 0,
@@ -53,7 +59,9 @@ export async function runRecommendDryRunScreening({
     };
     const buildPartialWorkflowResult = (stage, statusMessage) => {
       const result = buildRecommendDryRunResult({
-        candidateLimit,
+        candidateLimit: requestedCandidateLimit,
+        scanLimit: requestedScanLimit,
+        passedCandidates,
         llmCalls,
         tabLabel,
         startIndex,
@@ -96,8 +104,8 @@ export async function runRecommendDryRunScreening({
       await sleep(stepDelayMs);
       await assertNotRiskPage(client, "打开推荐详情后检查");
 
-      for (let index = 0; index < candidateLimit; index += 1) {
-        emitProgress("open_recommend_candidate", `正在处理候选人 ${index + 1}/${candidateLimit}`, {
+      for (let index = 0; index < requestedScanLimit && passedCandidates < requestedCandidateLimit; index += 1) {
+        emitProgress("open_recommend_candidate", `正在扫描候选人 ${index + 1}/${requestedScanLimit}，目标通过 ${requestedCandidateLimit} 人`, {
           currentIndex: index + 1
         });
         const snapshot = await readRecommendModalSnapshot(client, { tabLabel });
@@ -160,10 +168,12 @@ export async function runRecommendDryRunScreening({
           reasoningCaptured: screening.reasoningCaptured,
           dryRunModalStable: !drift
         };
+        if (screening.decision.decision === "pass") passedCandidates += 1;
         items.push(item);
 
         emitProgress("candidate_completed", `候选人已完成：${item.candidateLabel || `候选人 ${index + 1}`}`, {
           processedCandidates: items.length,
+          passedCandidates,
           screenableCandidates: items.length,
           llmCalls,
           currentCandidateLabel: item.candidateLabel || "",
@@ -175,7 +185,7 @@ export async function runRecommendDryRunScreening({
           }
         });
 
-        if (index >= candidateLimit - 1) break;
+        if (passedCandidates >= requestedCandidateLimit || index >= requestedScanLimit - 1) break;
         const nextAction = await clickRecommendNextAndWait(client, snapshot.domHash);
         if (!nextAction.changed) {
           violations.push({
@@ -191,7 +201,9 @@ export async function runRecommendDryRunScreening({
 
       const closeAction = await closeRecommendModalVerified(client);
       const result = buildRecommendDryRunResult({
-        candidateLimit,
+        candidateLimit: requestedCandidateLimit,
+        scanLimit: requestedScanLimit,
+        passedCandidates,
         llmCalls,
         tabLabel,
         startIndex,
@@ -240,7 +252,9 @@ export function summarizeRecommendDryRunScreening(result) {
   return {
     ok: Boolean(result?.passed),
     dryRun: Boolean(result?.dryRun),
+    requestedCandidateLimit: result?.requestedCandidateLimit || 0,
     processedCandidates: result?.processedCandidates || 0,
+    passedCandidates: result?.passedCandidates || 0,
     screenableCandidates: result?.screenableCandidates || 0,
     llmCalls: result?.llmCalls || 0,
     actionClicks: result?.actionClicks || 0,
@@ -258,7 +272,7 @@ export function evaluateRecommendDryRunScreening(result) {
   const coveragePassed = items.every((item) => item.coverage?.passed);
 
   if (!result?.dryRun) failures.push("not_dry_run");
-  if (items.length < requested) failures.push("not_enough_candidates");
+  if ((result?.passedCandidates || 0) < requested) failures.push("not_enough_passed_candidates");
   if (uniqueTextHashes.size < items.length) failures.push("duplicate_candidates");
   if ((result?.llmCalls || 0) !== items.length) failures.push("llm_call_count_mismatch");
   if ((result?.actionClicks || 0) !== 0) failures.push("action_clicks_not_zero");
@@ -280,7 +294,9 @@ function buildRecommendDryRunProgressSnapshot(state = {}) {
   return {
     workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
     targetCandidates: Math.max(1, state.targetCandidates || 1),
+    scanLimit: Math.max(1, state.scanLimit || state.targetCandidates || 1),
     processedCandidates: state.processedCandidates || 0,
+    passedCandidates: state.passedCandidates || 0,
     screenableCandidates: state.screenableCandidates || 0,
     llmCalls: state.llmCalls || 0,
     actionClicks: state.actionClicks || 0,
@@ -292,6 +308,8 @@ function buildRecommendDryRunProgressSnapshot(state = {}) {
 
 function buildRecommendDryRunResult({
   candidateLimit,
+  scanLimit,
+  passedCandidates,
   llmCalls,
   tabLabel,
   startIndex,
@@ -309,7 +327,9 @@ function buildRecommendDryRunResult({
     schemaVersion: RECOMMEND_DRY_RUN_SCHEMA_VERSION,
     dryRun: true,
     requestedCandidateLimit: candidateLimit,
+    scanLimit,
     processedCandidates: items.length,
+    passedCandidates,
     screenableCandidates: items.length,
     llmCalls,
     actionClicks: 0,

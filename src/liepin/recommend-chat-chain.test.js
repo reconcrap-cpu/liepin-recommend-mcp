@@ -88,6 +88,7 @@ test("evaluateRecommendChatChain rejects resume requests from non-screenable cha
   const evaluation = evaluateRecommendChatChain({
     requestedCandidateLimit: 1,
     chainedCandidates: 1,
+    passedCandidates: 0,
     samePageChatEntries: 1,
     executeRequestResume: true,
     requestResumeClicks: 1,
@@ -117,6 +118,7 @@ test("summarizeRecommendChatChain reports P22 chain counters", () => {
     requestedCandidateLimit: 5,
     scannedCandidates: 6,
     chainedCandidates: 5,
+    passedCandidates: 5,
     samePageChatEntries: 5,
     chatPageEntries: 0,
     screenableChatEntries: 4,
@@ -136,6 +138,7 @@ test("summarizeRecommendChatChain reports P22 chain counters", () => {
     requestedCandidateLimit: 5,
     scannedCandidates: 6,
     chainedCandidates: 5,
+    passedCandidates: 5,
     samePageChatEntries: 5,
     chatPageEntries: 0,
     screenableChatEntries: 4,
@@ -154,6 +157,7 @@ test("evaluateRecommendChatChain accepts verified chat_page entry kind", () => {
   const evaluation = evaluateRecommendChatChain({
     requestedCandidateLimit: 1,
     chainedCandidates: 1,
+    passedCandidates: 1,
     samePageChatEntries: 0,
     chatPageEntries: 1,
     executeRequestResume: true,

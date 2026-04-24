@@ -13,7 +13,7 @@ description: "Use when users want chat-only screening on Liepin chat page via li
 
 ## Tool Routing
 
-- 启动前检查：`liepin_doctor`（必要时 `provider_check=true`）
+- 启动前检查：`liepin_doctor`（必须传 `require_chat_page=true`；必要时 `provider_check=true`）
 - 启动聊天筛选：`liepin_chat_start`
 - 进度/控制：`liepin_run_status` / `liepin_run_pause` / `liepin_run_resume` / `liepin_run_cancel`
 - 环境修复：`liepin_install` / `liepin_self_heal`
@@ -21,7 +21,7 @@ description: "Use when users want chat-only screening on Liepin chat page via li
 ## Hard Rules (Must Follow)
 
 - 只要是 chat-only 任务，必须在启动前确认所有必填参数，不能靠默认值直接启动。
-- 每次新的 chat start 前必须先通过 doctor，且 `screening-config.json` 的 `baseUrl/apiKey/model` 不能是占位值。
+- 每次新的 chat start 前必须先通过 `liepin_doctor(require_chat_page=true)`，且 `screening-config.json` 的 `baseUrl/apiKey/model` 不能是占位值。
 - 禁止 agent 自行补齐 `candidate_limit/filter/criteria` 后直接执行；必须由用户明确给出或确认。
 - `liepin_chat_start` 只能在参数齐全且用户明确“确认启动”后调用。
 - 拿到 `ACCEPTED + run_id` 后默认停止本轮，不自动高频轮询。

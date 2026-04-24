@@ -12,7 +12,12 @@ import {
   RUN_KINDS,
   RUN_WORKFLOWS
 } from "./constants.js";
-import { ensureRuntimeLayout, getWorkspaceRoot, readScreeningConfig } from "./config.js";
+import {
+  ensureRuntimeLayout,
+  getWorkspaceRoot,
+  readScreeningConfig,
+  resolveDefaultDebugPort
+} from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { probeResumeAcquisitionMatrix } from "./liepin/acquisition-matrix.js";
 import { executeChatAction, summarizeChatActionResult } from "./liepin/chat-action.js";
@@ -81,8 +86,13 @@ import {
 } from "./run-state.js";
 import { normalizeText, parsePositiveInteger, readJsonFile } from "./utils.js";
 
+const currentFilePath = fileURLToPath(import.meta.url);
+const workerScriptPath = path.join(path.dirname(currentFilePath), "worker.js");
+
 export async function runCli(argv = process.argv.slice(2)) {
-  ensureRuntimeLayout(getWorkspaceRoot());
+  const workspaceRoot = getWorkspaceRoot();
+  ensureRuntimeLayout(workspaceRoot);
+  const defaultDebugPort = resolveDefaultDebugPort(workspaceRoot);
   const command = argv[0];
   const subcommand = argv[1];
   const flags = parseFlags(argv.slice(2));
@@ -100,10 +110,11 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   if (command === "doctor") {
     const result = await runDoctor({
-      workspaceRoot: getWorkspaceRoot(),
-      port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], DEFAULT_DEBUG_PORT),
+      workspaceRoot,
+      port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], defaultDebugPort),
       fix: Boolean(rootFlags.fix),
-      providerCheck: Boolean(rootFlags["provider-check"] || rootFlags.providerCheck)
+      providerCheck: Boolean(rootFlags["provider-check"] || rootFlags.providerCheck),
+      requireChatPage: Boolean(rootFlags["require-chat-page"] || rootFlags.requireChatPage)
     });
     printJson(result);
     if (!result.ok) process.exitCode = 1;
@@ -112,7 +123,7 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   if (command === "install") {
     const result = runInstall({
-      workspaceRoot: getWorkspaceRoot(),
+      workspaceRoot,
       writeConfigTemplate: parseOptionalBoolean(
         rootFlags["write-config-template"] || rootFlags.writeConfigTemplate,
         true
@@ -136,9 +147,10 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   if (command === "self-heal") {
     const result = await runSelfHeal({
-      workspaceRoot: getWorkspaceRoot(),
-      port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], DEFAULT_DEBUG_PORT),
+      workspaceRoot,
+      port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], defaultDebugPort),
       providerCheck: Boolean(rootFlags["provider-check"] || rootFlags.providerCheck),
+      requireChatPage: Boolean(rootFlags["require-chat-page"] || rootFlags.requireChatPage),
       exportExternalConfig: parseOptionalBoolean(
         rootFlags["export-external-config"] || rootFlags.exportExternalConfig,
         true
@@ -155,7 +167,7 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   if (command === "skill" && subcommand === "export") {
     const result = exportSkill({
-      workspaceRoot: getWorkspaceRoot(),
+      workspaceRoot,
       format: normalizeText(flags.format) || "markdown",
       outputPath: normalizeText(flags.output) || null
     });
@@ -175,7 +187,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     )
   ) {
     const result = exportExternalAgentConfig({
-      workspaceRoot: getWorkspaceRoot(),
+      workspaceRoot,
       outputPath: normalizeText(flags.output || rootFlags.output) || null
     });
     printJson(result);
@@ -183,7 +195,7 @@ export async function runCli(argv = process.argv.slice(2)) {
   }
 
   if (command === "research") {
-    await runResearchCommand(subcommand, flags);
+    await runResearchCommand(subcommand, flags, workspaceRoot);
     return;
   }
 
@@ -198,7 +210,7 @@ export async function runCli(argv = process.argv.slice(2)) {
   }
 
   if (["recommend", "chat", "recommend-chat"].includes(command) && subcommand === "start") {
-    const input = parseStartInputFlags(command, flags);
+    const input = parseStartInputFlags(command, flags, defaultDebugPort);
     assertCliSideEffectApproval({
       needsChatAction: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
       needsRequestResume: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
@@ -207,14 +219,14 @@ export async function runCli(argv = process.argv.slice(2)) {
       allowRequestResume: Boolean(input.allow_request_resume)
     });
     const snapshot = createRunSnapshot({
-      workspaceRoot: getWorkspaceRoot(),
+      workspaceRoot,
       kind: command,
       mode: "async_workflow",
       phase: "P29",
       input
     });
     const worker = spawnWorkerProcess({
-      workspaceRoot: getWorkspaceRoot(),
+      workspaceRoot,
       runId: snapshot.run_id
     });
     printJson({
@@ -244,8 +256,11 @@ async function runProviderCommand(subcommand, flags) {
   throw new Error(`Unknown provider command: ${subcommand || ""}`);
 }
 
-async function runResearchCommand(subcommand, flags) {
-  const port = parsePositiveInteger(flags.debugPort || flags["debug-port"], DEFAULT_DEBUG_PORT);
+async function runResearchCommand(subcommand, flags, workspaceRoot = getWorkspaceRoot()) {
+  const port = parsePositiveInteger(
+    flags.debugPort || flags["debug-port"],
+    resolveDefaultDebugPort(workspaceRoot)
+  );
   if (subcommand === "discover") {
     printJson(await runChromeDiscovery({ port }));
     return;
@@ -682,9 +697,9 @@ function parseFlags(argv) {
   return flags;
 }
 
-function parseStartInputFlags(kind, flags) {
+function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT) {
   const base = {
-    debug_port: parsePositiveInteger(flags.debugPort || flags["debug-port"], DEFAULT_DEBUG_PORT),
+    debug_port: parsePositiveInteger(flags.debugPort || flags["debug-port"], defaultDebugPort),
     sample_limit: parsePositiveInteger(flags.limit || flags.sampleLimit, DEFAULT_RECOMMEND_SAMPLE_LIMIT),
     candidate_limit: parsePositiveInteger(flags["candidate-limit"] || flags.candidateLimit, null),
     tab: normalizeText(flags.tab) || "推荐",
@@ -825,9 +840,9 @@ function buildHelp() {
     "liepin-recommend-mcp commands",
     "",
     "  start",
-    "  doctor [--debug-port 9222] [--fix] [--provider-check]",
+    "  doctor [--debug-port 9222] [--fix] [--provider-check] [--require-chat-page]",
     "  install [--agent trae-cn|openclaw|cursor|trae|claude|all] [--write-config-template true|false] [--overwrite-config-template] [--export-external-config true|false] [--external-config-path <path>]",
-    "  self-heal [--agent trae-cn|openclaw|cursor|trae|claude|all] [--debug-port 9222] [--provider-check] [--export-external-config true|false] [--external-config-path <path>]",
+    "  self-heal [--agent trae-cn|openclaw|cursor|trae|claude|all] [--debug-port 9222] [--provider-check] [--require-chat-page] [--export-external-config true|false] [--external-config-path <path>]",
     "  skill export [--format markdown|json] [--output <path>]",
     "  external-agent config [--output <path>]",
     "  external-agent-config [--output <path>]",
@@ -869,7 +884,7 @@ function spawnWorkerProcess({ workspaceRoot, runId }) {
   const child = spawn(
     process.execPath,
     [
-      path.join(workspaceRoot, "src", "worker.js"),
+      workerScriptPath,
       "--run-id",
       runId,
       "--workspace-root",
@@ -886,7 +901,6 @@ function spawnWorkerProcess({ workspaceRoot, runId }) {
   return child;
 }
 
-const currentFilePath = fileURLToPath(import.meta.url);
 if (process.argv[1] && currentFilePath === process.argv[1]) {
   runCli(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error?.stack || error?.message || String(error)}\n`);
