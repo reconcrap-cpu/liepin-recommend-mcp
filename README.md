@@ -5,7 +5,7 @@ Liepin Recommend MCP is a Node.js MCP/CLI helper for researching and operating L
 ## Install
 
 ```sh
-npm install -g liepin-mcp
+npm install -g @reconcrap/liepin-mcp
 liepin-mcp install --agent trae-cn
 ```
 
