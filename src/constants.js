@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 
-export const SERVER_NAME = "liepin-recommend-mcp";
+export const SERVER_NAME = "liepin-mcp";
 export const SERVER_VERSION = "0.1.0";
 export const DEFAULT_DEBUG_PORT = 9222;
 export const DEFAULT_TARGET_SURVEY_MIN = 50;

@@ -932,7 +932,7 @@ function buildSurveyProgressLogger(flags) {
 
 function buildHelp() {
   return [
-    "liepin-recommend-mcp commands",
+    "liepin-mcp commands",
     "",
     "  start",
     "  doctor [--debug-port 9222] [--fix] [--provider-check] [--require-chat-page]",

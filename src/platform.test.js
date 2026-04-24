@@ -30,15 +30,15 @@ test("buildExternalAgentConfig includes MCP server bootstrap fields", () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-platform-"));
   withRuntimeHome(workspaceRoot, () => {
     const config = buildExternalAgentConfig({ workspaceRoot });
-    assert.equal(Boolean(config.mcpServers["liepin-recommend-mcp"]), true);
-    assert.equal(config.mcpServers["liepin-recommend-mcp"].command, "node");
+    assert.equal(Boolean(config.mcpServers["liepin-mcp"]), true);
+    assert.equal(config.mcpServers["liepin-mcp"].command, "node");
     assert.equal(
-      config.mcpServers["liepin-recommend-mcp"].args.some((item) => String(item).endsWith(path.join("bin", "liepin-recommend-mcp.js"))),
+      config.mcpServers["liepin-mcp"].args.some((item) => String(item).endsWith(path.join("bin", "liepin-recommend-mcp.js"))),
       true
     );
-    assert.equal(config.mcpServers["liepin-recommend-mcp"].args.includes("start"), true);
+    assert.equal(config.mcpServers["liepin-mcp"].args.includes("start"), true);
     assert.equal(
-      config.mcpServers["liepin-recommend-mcp"].env.LIEPIN_WORKSPACE_ROOT,
+      config.mcpServers["liepin-mcp"].env.LIEPIN_WORKSPACE_ROOT,
       path.resolve(workspaceRoot)
     );
   });
@@ -93,9 +93,9 @@ test("runInstall syncs MCP config and skill into trae-cn targets", () => {
       );
       const mcpConfig = JSON.parse(fs.readFileSync(traeMcpPath, "utf8"));
       assert.equal(Boolean(mcpConfig.mcpServers.existing), true);
-      assert.equal(Boolean(mcpConfig.mcpServers["liepin-recommend-mcp"]), true);
+      assert.equal(Boolean(mcpConfig.mcpServers["liepin-mcp"]), true);
       assert.equal(
-        mcpConfig.mcpServers["liepin-recommend-mcp"].env.LIEPIN_WORKSPACE_ROOT,
+        mcpConfig.mcpServers["liepin-mcp"].env.LIEPIN_WORKSPACE_ROOT,
         path.resolve(workspaceRoot)
       );
       assert.equal(

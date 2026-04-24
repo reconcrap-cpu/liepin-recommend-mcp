@@ -1,5 +1,5 @@
 {
-  "name": "@reconcrap/liepin-recommend-mcp",
+  "name": "liepin-mcp",
   "version": "0.1.8",
   "description": "Liepin recommend/chat MCP pipeline with phased development guardrails",
   "type": "module",
@@ -13,6 +13,7 @@
   },
   "homepage": "https://github.com/reconcrap-cpu/liepin-recommend-mcp#readme",
   "bin": {
+    "liepin-mcp": "bin/liepin-recommend-mcp.js",
     "liepin-recommend-mcp": "bin/liepin-recommend-mcp.js"
   },
   "scripts": {

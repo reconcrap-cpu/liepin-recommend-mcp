@@ -25,8 +25,8 @@ const packageJsonPath = path.join(packageRoot, "package.json");
 const supportedExternalAgents = ["cursor", "trae", "trae-cn", "claude", "openclaw"];
 const externalMcpTargetsEnv = "LIEPIN_MCP_CONFIG_TARGETS";
 const externalSkillDirsEnv = "LIEPIN_EXTERNAL_SKILL_DIRS";
-const liepinPackageName = "@reconcrap/liepin-recommend-mcp";
-const liepinBinaryName = "liepin-recommend-mcp";
+const liepinPackageName = "liepin-mcp";
+const liepinBinaryName = "liepin-mcp";
 
 function getPackageVersion() {
   try {
@@ -45,6 +45,7 @@ function isInstalledPackageRoot(rootPath = packageRoot) {
     .toLowerCase();
   return (
     normalized.includes("/appdata/local/npm-cache/_npx/")
+    || normalized.includes("/node_modules/liepin-mcp")
     || normalized.includes("/node_modules/@reconcrap/liepin-recommend-mcp")
   );
 }

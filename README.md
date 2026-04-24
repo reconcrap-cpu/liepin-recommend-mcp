@@ -5,8 +5,8 @@ Liepin Recommend MCP is a Node.js MCP/CLI helper for researching and operating L
 ## Install
 
 ```sh
-npm install -g @reconcrap/liepin-recommend-mcp
-liepin-recommend-mcp install --agent trae-cn
+npm install -g liepin-mcp
+liepin-mcp install --agent trae-cn
 ```
 
 `install` will:
@@ -17,16 +17,16 @@ liepin-recommend-mcp install --agent trae-cn
 ## Usage
 
 ```sh
-liepin-recommend-mcp doctor --json
-liepin-recommend-mcp install
-liepin-recommend-mcp install --agent openclaw
-liepin-recommend-mcp self-heal --provider-check
-liepin-recommend-mcp skill export --format markdown
-liepin-recommend-mcp external-agent config
-liepin-recommend-mcp research discover --debug-port 9222
-liepin-recommend-mcp recommend start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
-liepin-recommend-mcp chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
-liepin-recommend-mcp recommend-chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
+liepin-mcp doctor --json
+liepin-mcp install
+liepin-mcp install --agent openclaw
+liepin-mcp self-heal --provider-check
+liepin-mcp skill export --format markdown
+liepin-mcp external-agent config
+liepin-mcp research discover --debug-port 9222
+liepin-mcp recommend start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
+liepin-mcp chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
+liepin-mcp recommend-chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
 ```
 
 Chrome must already be running with a remote debugging port, for example `9222`, and the operator must be logged in to Liepin in that browser profile.
