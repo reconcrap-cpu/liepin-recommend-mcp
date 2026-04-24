@@ -182,7 +182,8 @@ export async function runChatDryRunScreening({
             afterState,
             manifest: screenInput.manifest,
             missingRequiredSourceIds: screenInput.manifest?.missingRequiredSourceIds || [],
-            reasoningCaptured: screening.reasoningCaptured
+            reasoningCaptured: screening.reasoningCaptured,
+            reasoningText: screening.reasoningText || ""
           };
           items.push(item);
           emitProgress("candidate_completed", `候选人已完成：${state.rowKey || `row-${state.rowIndex}`}`, {

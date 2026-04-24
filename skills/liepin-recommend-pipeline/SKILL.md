@@ -13,7 +13,7 @@ chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepi
 
 ## Tool Routing
 
-- 启动前检查：`liepin_doctor`（推荐页筛选默认不要求聊天页；必要时 `provider_check=true`）
+- 启动前检查：`liepin_doctor`（必须传 `target_page="recommend"`, `fix=true`；必要时 `provider_check=true`）
 - 推荐页筛选条件选项：`liepin_recommend_filter_options`
 - 推荐页筛选：`liepin_recommend_start`
 - 推荐后衔接聊天：`liepin_recommend_chat_start`
@@ -27,9 +27,12 @@ chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepi
   - chat-only 语义（例如“只在聊天页筛选”）：必须切换 `liepin-chat`，不要在这里启动 `liepin_recommend_start` / `liepin_recommend_chat_start`。
 
 - **Preflight 强制**
-  - 每次新的 `start` 之前必须先做 `liepin_doctor` 检查，确认环境可用。
+  - 每次新的 `start` 之前必须先做 `liepin_doctor(target_page="recommend", fix=true)` 检查，确认环境可用。
+  - doctor 若发现依赖缺失、Chrome debug 端口未打开、或当前不在推荐页，应先自动安装/打开/导航到推荐页，不要要求用户手动打开目标页。
   - `screening-config.json` 的 `baseUrl/apiKey/model` 必须都是真实值，不能是模板占位值（例如 `https://your-llm-endpoint.example.com/v1`、`replace-with-real-api-key`、`your-model-name`）。
   - 当 doctor 提示配置缺失或占位值未替换时，禁止启动 run；先要求用户修改，并在用户明确回复“已修改完成”后重跑 doctor。
+  - 只有 doctor 返回无法自动解决的问题时才寻求用户帮助；例如猎聘未登录时，请提示用户在自动打开的 Chrome 中完成登录。
+  - 用户反馈已登录后，继续同一任务：重新调用 `liepin_doctor(target_page="recommend", fix=true)`；若登录后仍不在推荐页，doctor 会自动导航，再继续参数确认/启动。
 
 - **参数确认（强制）**
   - 缺少筛选条件时，必须先调用 `liepin_recommend_filter_options`，把返回的可用筛选字段和选项展示给用户选择。

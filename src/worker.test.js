@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { ENV_HOME, RUN_KINDS, RUN_WORKFLOWS } from "./constants.js";
-import { createRunSnapshot, readRunState } from "./run-state.js";
+import { createRunSnapshot, readRunState, requestPause } from "./run-state.js";
 import { runWorker } from "./worker.js";
 
 test("runWorker executes async P23 recommend dry-run workflow with injected executor", async () => {
@@ -165,6 +165,69 @@ test("runWorker executes search chat-chain workflow with injected executor", asy
     assert.equal(stored.result.workflow, RUN_WORKFLOWS.SEARCH_CHAT_CHAIN);
     assert.equal(stored.result.summary.ok, true);
     assert.equal(stored.artifact_summary.itemCount, 1);
+    assert.equal(Boolean(stored.artifact_summary.csvPath), true);
+  });
+});
+
+test("runWorker pauses search only at safe checkpoint point", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.SEARCH,
+      phase: "P30",
+      input: {
+        workflow: RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
+        mock_llm: true,
+        profile: "测试",
+        job: "招聘实习生",
+        candidate_limit: 2
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        searchChatChain: async (_browser, options) => {
+          const partialResult = {
+            workflow: RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
+            summary: { ok: false, scannedCandidates: 1 },
+            result: {
+              items: [
+                {
+                  index: 0,
+                  candidate: { name: "张三", resumeId: "resume-1" },
+                  llmCalled: true,
+                  decision: { decision: "pass", post_action: "chat" },
+                  reasoningText: "search cot",
+                  status: "search_contacted",
+                  chatAction: { ok: true, clicked: true, status: "search_contacted" }
+                }
+              ]
+            }
+          };
+          await options.onCheckpoint({
+            schemaVersion: "liepin_search_chat_chain_checkpoint_v1",
+            profile: "测试",
+            jobTitle: "招聘实习生",
+            currentPageNumber: 1,
+            pageCardIndex: 1,
+            items: partialResult.result.items
+          });
+          requestPause(workspaceRoot, snapshot.run_id);
+          options.onSafeControlPoint(partialResult);
+          throw new Error("safe control point should interrupt");
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "paused");
+    assert.equal(fs.existsSync(stored.artifact_summary.checkpointPath), true);
+    assert.equal(Boolean(stored.artifact_summary.csvPath), true);
+    const csvContent = fs.readFileSync(stored.artifact_summary.csvPath, "utf8");
+    assert.equal(csvContent.includes("search cot"), true);
   });
 });
 
@@ -381,7 +444,9 @@ test("runWorker keeps partial artifacts when workflow fails after progress", asy
                   rowIndex: 0,
                   rowKey: "chat-row-1",
                   status: "screened",
-                  decision: { decision: "pass", post_action: "request_resume" }
+                  llmCalled: true,
+                  decision: { decision: "pass", post_action: "request_resume" },
+                  reasoningText: "chat partial cot"
                 }
               ]
             }
@@ -409,6 +474,8 @@ test("runWorker keeps partial artifacts when workflow fails after progress", asy
     assert.equal(stored.artifact_summary.itemCount, 1);
     const screenInput = JSON.parse(fs.readFileSync(stored.artifacts.screenInputPath, "utf8"));
     assert.equal(screenInput.items.length, 1);
+    const csvContent = fs.readFileSync(stored.artifact_summary.csvPath, "utf8");
+    assert.equal(csvContent.includes("chat partial cot"), true);
   });
 });
 

@@ -166,6 +166,7 @@ export async function runRecommendDryRunScreening({
           wouldPostAction: screening.decision.post_action,
           actionExecuted: false,
           reasoningCaptured: screening.reasoningCaptured,
+          reasoningText: screening.reasoningText || "",
           dryRunModalStable: !drift
         };
         if (screening.decision.decision === "pass") passedCandidates += 1;

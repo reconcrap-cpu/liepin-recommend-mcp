@@ -10,6 +10,13 @@ import { ENV_HOME, RUN_KINDS, RUN_WORKFLOWS, TOOL_NAMES } from "./constants.js";
 import { createRunSnapshot, markRunCompleted, updateRunProgress } from "./run-state.js";
 
 const stubWorker = () => ({ pid: 12345 });
+const okDoctor = async (options = {}) => ({
+  ok: true,
+  targetPage: options.targetPage || (options.requireChatPage ? "chat" : "recommend"),
+  checks: [],
+  recommendations: [],
+  fixes: []
+});
 
 test("tools/list exposes liepin-prefixed tools", async () => {
   const response = await handleJsonRpc({
@@ -26,6 +33,8 @@ test("tools/list exposes liepin-prefixed tools", async () => {
   assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.recommendFilterOptions), true);
   assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.searchOptions), true);
   assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.searchStart), true);
+  const doctorTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.doctor);
+  assert.deepEqual(doctorTool.inputSchema.properties.target_page.enum, ["recommend", "search", "chat"]);
   const recommendChatTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.recommendChatStart);
   assert.equal(recommendChatTool.inputSchema.properties.allow_chat_action.type, "boolean");
   assert.equal(recommendChatTool.inputSchema.properties.allow_request_resume.type, "boolean");
@@ -96,7 +105,7 @@ test("recommend-chat start defaults to production click actions over JSON-RPC", 
         candidate_limit: 1
       }
     }
-  }, process.cwd(), { spawnWorker: stubWorker });
+  }, process.cwd(), { spawnWorker: stubWorker, runDoctorFn: okDoctor });
   const payload = JSON.parse(response.result.content[0].text);
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
@@ -115,7 +124,7 @@ test("recommend start defaults to production chain over JSON-RPC", async () => {
         candidate_limit: 1
       }
     }
-  }, process.cwd(), { spawnWorker: stubWorker });
+  }, process.cwd(), { spawnWorker: stubWorker, runDoctorFn: okDoctor });
   const payload = JSON.parse(response.result.content[0].text);
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
@@ -134,7 +143,7 @@ test("chat start defaults to production chain over JSON-RPC", async () => {
         candidate_limit: 1
       }
     }
-  }, process.cwd(), { spawnWorker: stubWorker });
+  }, process.cwd(), { spawnWorker: stubWorker, runDoctorFn: okDoctor });
   const payload = JSON.parse(response.result.content[0].text);
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
@@ -155,7 +164,7 @@ test("search start defaults to search chat chain over JSON-RPC", async () => {
         candidate_limit: 1
       }
     }
-  }, process.cwd(), { spawnWorker: stubWorker });
+  }, process.cwd(), { spawnWorker: stubWorker, runDoctorFn: okDoctor });
   const payload = JSON.parse(response.result.content[0].text);
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
@@ -177,10 +186,65 @@ test("search start rejects when chat action is not allowed", async () => {
         allow_chat_action: false
       }
     }
-  }, process.cwd(), { spawnWorker: stubWorker });
+  }, process.cwd(), { spawnWorker: stubWorker, runDoctorFn: okDoctor });
   const payload = JSON.parse(response.result.content[0].text);
   assert.equal(response.result.isError, true);
   assert.equal(payload.error.code, "SIDE_EFFECT_APPROVAL_REQUIRED");
+});
+
+test("start tools run target-page doctor preflight before accepting", async () => {
+  const observed = [];
+  const response = await handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 11,
+    method: "tools/call",
+    params: {
+      name: TOOL_NAMES.searchStart,
+      arguments: {
+        mock_llm: true,
+        profile: "测试",
+        job: "招聘实习生",
+        candidate_limit: 1
+      }
+    }
+  }, process.cwd(), {
+    spawnWorker: stubWorker,
+    runDoctorFn: async (options = {}) => {
+      observed.push(options);
+      return okDoctor(options);
+    }
+  });
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, false);
+  assert.equal(payload.preflight.targetPage, "search");
+  assert.equal(observed[0].targetPage, "search");
+  assert.equal(observed[0].fix, true);
+  assert.equal(observed[0].requireScreeningConfig, false);
+});
+
+test("doctor auto-fixes when a target page is requested over JSON-RPC", async () => {
+  const observed = [];
+  const response = await handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 12,
+    method: "tools/call",
+    params: {
+      name: TOOL_NAMES.doctor,
+      arguments: {
+        target_page: "chat",
+        require_chat_page: true
+      }
+    }
+  }, process.cwd(), {
+    runDoctorFn: async (options = {}) => {
+      observed.push(options);
+      return okDoctor(options);
+    }
+  });
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, false);
+  assert.equal(payload.targetPage, "chat");
+  assert.equal(observed[0].fix, true);
 });
 
 test("doctor uses configured debugPort when debug_port is omitted", async () => {

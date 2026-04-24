@@ -15,7 +15,7 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 
 ## Tool Routing
 
-- 启动前检查：`liepin_doctor`（搜索页不要求推荐页或聊天页；必要时 `provider_check=true`）
+- 启动前检查：`liepin_doctor`（必须传 `target_page="search"`, `fix=true`；必要时 `provider_check=true`）
 - 搜索页可选项：`liepin_search_options`
 - 搜索页筛选并沟通：`liepin_search_start`
 - 进度/控制：`liepin_run_status` / `liepin_run_pause` / `liepin_run_resume` / `liepin_run_cancel`
@@ -24,9 +24,12 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 ## Hard Rules (Must Follow)
 
 - **Preflight 强制**
-  - 每次新的 `liepin_search_start` 前必须先做 `liepin_doctor` 检查，确认 Chrome debug port、LLM config、风控状态可用。
+  - 每次新的 `liepin_search_start` 前必须先做 `liepin_doctor(target_page="search", fix=true)` 检查，确认 Chrome debug port、LLM config、风控状态可用。
+  - doctor 若发现依赖缺失、Chrome debug 端口未打开、或当前不在搜索页，应先自动安装/打开/导航到搜索页，不要要求用户手动打开目标页。
   - `screening-config.json` 的 `baseUrl/apiKey/model` 必须都是真实值，不能是模板占位值。
   - 如果 doctor 发现风控/验证码页，禁止启动 run。
+  - 只有 doctor 返回无法自动解决的问题时才寻求用户帮助；例如猎聘未登录时，请提示用户在自动打开的 Chrome 中完成登录。
+  - 用户反馈已登录后，继续同一任务：重新调用 `liepin_doctor(target_page="search", fix=true)`；若登录后仍不在搜索页，doctor 会自动导航，再继续 `liepin_search_options` / 启动。
 
 - **选项发现强制**
   - 启动前必须调用 `liepin_search_options`。

@@ -78,10 +78,44 @@ test("runStructuredScreening writes provider-native reasoning chunks when availa
       post_action: "request_resume"
     });
     assert.equal(result.reasoningCaptured, true);
+    assert.equal(result.reasoningText, "native reasoning chunk");
     assert.equal(fs.readFileSync(reasoningLogPath, "utf8"), "native reasoning chunk\n");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("runStructuredScreening captures native reasoning fields without requesting reasons", async () => {
+  const result = await runStructuredScreening({
+    mode: "recommend",
+    screenInput,
+    config: {
+      model: "test-model"
+    },
+    provider: async ({ request }) => {
+      assert.equal(JSON.stringify(request).includes("\"reason\""), false);
+      return {
+        choices: [
+          {
+            message: {
+              reasoning_content: "先核对经历，再给出结构化结论。",
+              content: JSON.stringify({
+                decision: "fail",
+                post_action: "none"
+              })
+            }
+          }
+        ]
+      };
+    }
+  });
+
+  assert.equal(result.reasoningCaptured, true);
+  assert.equal(result.reasoningText, "先核对经历，再给出结构化结论。");
+  assert.deepEqual(result.decision, {
+    decision: "fail",
+    post_action: "none"
+  });
 });
 
 test("runStructuredScreening accepts providers without reasoning stream", async () => {

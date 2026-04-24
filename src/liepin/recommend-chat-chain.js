@@ -253,6 +253,8 @@ export async function runRecommendChatChain({
         item.recommendLlmCalled = true;
         item.recommendDecision = recommendScreening.decision;
         item.recommendLlmRequest = recommendScreening.request;
+        item.recommendReasoningCaptured = recommendScreening.reasoningCaptured;
+        item.recommendReasoningText = recommendScreening.reasoningText || "";
 
         if (!shouldEnterChat(item.recommendDecision)) {
           item.status = "recommend_rejected";
@@ -401,6 +403,8 @@ export async function runRecommendChatChain({
         item.chatLlmCalled = true;
         item.chatDecision = chatScreening.decision;
         item.chatLlmRequest = chatScreening.request;
+        item.chatReasoningCaptured = chatScreening.reasoningCaptured;
+        item.chatReasoningText = chatScreening.reasoningText || "";
         item.wouldPostAction = chatScreening.decision.post_action;
         if (isFinalPass(chatScreening.decision)) passedCandidates += 1;
 

@@ -93,10 +93,12 @@ export async function runStructuredScreening({
     operatorFilters
   });
   let reasoningCaptured = false;
+  const reasoningFragments = [];
   const onReasoningDelta = (chunk) => {
     const text = String(chunk || "");
     if (!text) return;
     reasoningCaptured = true;
+    reasoningFragments.push(text);
     if (!reasoningLogPath) return;
     ensureDirSync(path.dirname(reasoningLogPath));
     fs.appendFileSync(reasoningLogPath, text, "utf8");
@@ -109,12 +111,22 @@ export async function runStructuredScreening({
     response = provider
       ? await provider({ request: currentRequest, onReasoningDelta })
       : await callOpenAiCompatibleJson({ config, request: currentRequest, fetchImpl });
+    const nativeReasoningText = extractNativeReasoningText(response);
+    if (nativeReasoningText) {
+      reasoningCaptured = true;
+      reasoningFragments.push(nativeReasoningText);
+      if (reasoningLogPath) {
+        ensureDirSync(path.dirname(reasoningLogPath));
+        fs.appendFileSync(reasoningLogPath, nativeReasoningText, "utf8");
+      }
+    }
     const content = extractResponseContent(response);
     try {
       return {
         request: currentRequest,
         decision: normalizeDecision(content, mode),
         reasoningCaptured,
+        reasoningText: dedupeStrings(reasoningFragments).join("\n"),
         rawResponse: response,
         schemaRepairAttempts: attempt
       };
@@ -199,6 +211,90 @@ function extractResponseContent(response) {
   }
   if (messageContent) return messageContent;
   return JSON.stringify(response || {});
+}
+
+function extractNativeReasoningText(response) {
+  const fragments = [];
+  collectNativeReasoning(response, fragments);
+  return dedupeStrings(fragments).join("\n");
+}
+
+function collectNativeReasoning(value, out = [], depth = 0, keyHint = "") {
+  if (depth > 6 || value === null || value === undefined) return out;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (isReasoningKey(keyHint)) {
+      const normalized = normalizeText(value);
+      if (normalized) out.push(normalized);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectNativeReasoning(item, out, depth + 1, keyHint);
+    }
+    return out;
+  }
+  if (typeof value !== "object") return out;
+
+  const type = normalizeText(value.type).toLowerCase();
+  if (type === "reasoning" || type === "reasoning_content") {
+    for (const key of ["text", "content", "summary", "summary_text"]) {
+      collectNestedText(value[key], out);
+    }
+  }
+
+  const directKeys = [
+    "reasoning",
+    "reasoning_content",
+    "reasoningContent",
+    "rawReasoningText",
+    "raw_reasoning_text"
+  ];
+  for (const key of directKeys) {
+    if (Object.hasOwn(value, key)) {
+      collectNestedText(value[key], out);
+    }
+  }
+
+  const choices = Array.isArray(value.choices) ? value.choices : [];
+  for (const choice of choices) {
+    collectNestedText(choice?.reasoning, out);
+    collectNestedText(choice?.reasoning_content, out);
+    collectNestedText(choice?.message?.reasoning, out);
+    collectNestedText(choice?.message?.reasoning_content, out);
+  }
+
+  const output = Array.isArray(value.output) ? value.output : [];
+  for (const item of output) {
+    const itemType = normalizeText(item?.type).toLowerCase();
+    if (itemType === "reasoning" || itemType === "reasoning_content") {
+      collectNestedText(item, out);
+    }
+  }
+  return out;
+}
+
+function collectNestedText(value, out = [], depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return out;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    const normalized = normalizeText(value);
+    if (normalized) out.push(normalized);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectNestedText(item, out, depth + 1);
+    return out;
+  }
+  if (typeof value === "object") {
+    for (const key of ["text", "content", "summary_text", "summary", "reasoning_content", "reasoning"]) {
+      if (Object.hasOwn(value, key)) collectNestedText(value[key], out, depth + 1);
+    }
+  }
+  return out;
+}
+
+function isReasoningKey(key) {
+  return /reasoning|reasoning_content|raw_reasoning|rawReasoning/u.test(String(key || ""));
 }
 
 function normalizeDecision(content, mode) {

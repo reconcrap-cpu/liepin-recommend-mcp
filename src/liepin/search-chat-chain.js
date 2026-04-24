@@ -26,6 +26,7 @@ import {
 } from "./search-action.js";
 
 export const SEARCH_CHAT_CHAIN_SCHEMA_VERSION = "liepin_search_chat_chain_v1";
+export const SEARCH_CHAT_CHAIN_CHECKPOINT_SCHEMA_VERSION = "liepin_search_chat_chain_checkpoint_v1";
 
 export async function runSearchChatChain({
   port = DEFAULT_DEBUG_PORT
@@ -41,6 +42,9 @@ export async function runSearchChatChain({
   operatorFilter = null,
   config = null,
   provider = null,
+  checkpoint = null,
+  onCheckpoint = null,
+  onSafeControlPoint = null,
   onProgress = null
 } = {}) {
   const requestedProfile = normalizeText(profile);
@@ -52,15 +56,24 @@ export async function runSearchChatChain({
   const requestedScanLimit = scanLimit
     ? Math.max(requestedCandidateLimit, scanLimit)
     : null;
-  const items = [];
-  const seenTextHashes = new Set();
-  const violations = [];
-  let llmCalls = 0;
-  let communicationClicks = 0;
-  let alreadyContactedCandidates = 0;
-  let passedCandidates = 0;
-  let currentPageNumber = 1;
-  let pageCardIndex = Math.max(0, startIndex || 0);
+  const restoredCheckpoint = normalizeSearchCheckpoint(checkpoint, {
+    profile: requestedProfile,
+    jobTitle: requestedJobTitle
+  });
+  const items = restoredCheckpoint?.items ? [...restoredCheckpoint.items] : [];
+  const seenTextHashes = new Set([
+    ...(restoredCheckpoint?.seenTextHashes || []),
+    ...items.map((item) => item.textHash).filter(Boolean)
+  ]);
+  const violations = restoredCheckpoint?.violations ? [...restoredCheckpoint.violations] : [];
+  let llmCalls = restoredCheckpoint?.llmCalls ?? items.filter((item) => item.llmCalled).length;
+  let communicationClicks = restoredCheckpoint?.communicationClicks ?? items.filter((item) => item.chatAction?.clicked).length;
+  let alreadyContactedCandidates = restoredCheckpoint?.alreadyContactedCandidates
+    ?? items.filter((item) => item.status === "search_already_contacted").length;
+  let passedCandidates = restoredCheckpoint?.passedCandidates
+    ?? items.filter((item) => ["search_contacted", "search_already_contacted"].includes(item.status)).length;
+  let currentPageNumber = restoredCheckpoint?.currentPageNumber || 1;
+  let pageCardIndex = restoredCheckpoint?.pageCardIndex ?? Math.max(0, startIndex || 0);
 
   const progressState = {
     targetCandidates: requestedCandidateLimit,
@@ -70,11 +83,11 @@ export async function runSearchChatChain({
     currentScan: null,
     currentPageNumber,
     currentCardIndex: null,
-    scannedCandidates: 0,
-    passedCandidates: 0,
-    llmCalls: 0,
-    communicationClicks: 0,
-    alreadyContactedCandidates: 0,
+    scannedCandidates: items.length,
+    passedCandidates,
+    llmCalls,
+    communicationClicks,
+    alreadyContactedCandidates,
     currentCandidateLabel: "",
     lastItem: null
   };
@@ -141,6 +154,23 @@ export async function runSearchChatChain({
         profile: requestedProfile
       });
       await waitForSearchCards(client);
+      if (restoredCheckpoint) {
+        const restoredPosition = await restoreSearchCheckpointPosition(client, {
+          targetPageNumber: currentPageNumber,
+          pageCardIndex
+        });
+        currentPageNumber = restoredPosition.currentPageNumber;
+        pageCardIndex = restoredPosition.pageCardIndex;
+        emitProgress("search_checkpoint_restored", `已恢复搜索 checkpoint：第 ${currentPageNumber} 页第 ${pageCardIndex + 1} 张卡片`, {
+          scannedCandidates: items.length,
+          passedCandidates,
+          llmCalls,
+          communicationClicks,
+          alreadyContactedCandidates,
+          currentPageNumber,
+          currentCardIndex: pageCardIndex
+        });
+      }
       emitProgress("search_profile_applied", `已应用搜索 profile：${requestedProfile}`, {
         scannedCandidates: items.length
       });
@@ -271,6 +301,8 @@ export async function runSearchChatChain({
           item.llmCalled = true;
           item.decision = screening.decision;
           item.llmRequest = screening.request;
+          item.reasoningCaptured = screening.reasoningCaptured;
+          item.reasoningText = screening.reasoningText || "";
 
           if (!shouldExecuteSearchChat(item.decision)) {
             item.status = item.decision?.decision === "pass"
@@ -326,6 +358,33 @@ export async function runSearchChatChain({
             }
           }
           pageCardIndex += 1;
+          if (item && items.includes(item)) {
+            const checkpointPayload = buildSearchCheckpoint({
+              requestedCandidateLimit,
+              requestedScanLimit,
+              requestedProfile,
+              requestedJobTitle,
+              startIndex,
+              stepDelayMs,
+              maxPayloadChars,
+              currentPageNumber,
+              pageCardIndex,
+              llmCalls,
+              communicationClicks,
+              alreadyContactedCandidates,
+              passedCandidates,
+              seenTextHashes,
+              violations,
+              items
+            });
+            const partialResult = buildPartialWorkflowResult("search_checkpoint", "已保存搜索 checkpoint");
+            if (typeof onCheckpoint === "function") {
+              await onCheckpoint(checkpointPayload, partialResult);
+            }
+            if (typeof onSafeControlPoint === "function") {
+              await onSafeControlPoint(partialResult);
+            }
+          }
         }
       }
 
@@ -538,6 +597,99 @@ function buildSearchOperatorFilter({
     profile ? `search_profile=${normalizeText(profile)}` : "",
     jobTitle ? `job=${normalizeText(jobTitle)}` : ""
   ].filter(Boolean).join("; ");
+}
+
+function normalizeSearchCheckpoint(checkpoint, {
+  profile,
+  jobTitle
+} = {}) {
+  if (!checkpoint || typeof checkpoint !== "object") return null;
+  if (checkpoint.schemaVersion !== SEARCH_CHAT_CHAIN_CHECKPOINT_SCHEMA_VERSION) return null;
+  const checkpointProfile = normalizeText(checkpoint.profile);
+  const checkpointJobTitle = normalizeText(checkpoint.jobTitle);
+  if (checkpointProfile && checkpointProfile !== normalizeText(profile)) {
+    throw new Error(`搜索 checkpoint profile 不匹配：${checkpointProfile} != ${normalizeText(profile)}`);
+  }
+  if (checkpointJobTitle && checkpointJobTitle !== normalizeText(jobTitle)) {
+    throw new Error(`搜索 checkpoint job 不匹配：${checkpointJobTitle} != ${normalizeText(jobTitle)}`);
+  }
+  return {
+    ...checkpoint,
+    currentPageNumber: Math.max(1, Number.parseInt(String(checkpoint.currentPageNumber || 1), 10) || 1),
+    pageCardIndex: Math.max(0, Number.parseInt(String(checkpoint.pageCardIndex || 0), 10) || 0),
+    items: Array.isArray(checkpoint.items) ? checkpoint.items : [],
+    violations: Array.isArray(checkpoint.violations) ? checkpoint.violations : [],
+    seenTextHashes: Array.isArray(checkpoint.seenTextHashes) ? checkpoint.seenTextHashes : []
+  };
+}
+
+function buildSearchCheckpoint({
+  requestedCandidateLimit,
+  requestedScanLimit,
+  requestedProfile,
+  requestedJobTitle,
+  startIndex,
+  stepDelayMs,
+  maxPayloadChars,
+  currentPageNumber,
+  pageCardIndex,
+  llmCalls,
+  communicationClicks,
+  alreadyContactedCandidates,
+  passedCandidates,
+  seenTextHashes,
+  violations,
+  items
+} = {}) {
+  return {
+    schemaVersion: SEARCH_CHAT_CHAIN_CHECKPOINT_SCHEMA_VERSION,
+    updatedAt: new Date().toISOString(),
+    profile: requestedProfile,
+    jobTitle: requestedJobTitle,
+    requestedCandidateLimit,
+    requestedScanLimit,
+    startIndex,
+    stepDelayMs,
+    maxPayloadChars,
+    currentPageNumber: Math.max(1, currentPageNumber || 1),
+    pageCardIndex: Math.max(0, pageCardIndex || 0),
+    llmCalls,
+    communicationClicks,
+    alreadyContactedCandidates,
+    passedCandidates,
+    seenTextHashes: [...seenTextHashes],
+    violations: [...violations],
+    items: [...items]
+  };
+}
+
+async function restoreSearchCheckpointPosition(client, {
+  targetPageNumber = 1,
+  pageCardIndex = 0
+} = {}) {
+  await waitForSearchCards(client);
+  let listState = await readSearchListState(client);
+  let currentPage = parsePageNumber(listState.activePageText, 1);
+  const targetPage = Math.max(1, targetPageNumber || 1);
+  if (currentPage > targetPage) {
+    throw new Error(`搜索 checkpoint 无法从第 ${currentPage} 页回退到第 ${targetPage} 页，请重新启动 run。`);
+  }
+  while (currentPage < targetPage) {
+    const nextPage = await clickSearchNextPage(client);
+    if (!nextPage.clicked) {
+      throw new Error(`搜索 checkpoint 恢复失败：无法进入第 ${currentPage + 1} 页（${nextPage.reason || "unknown"}）`);
+    }
+    await waitForSearchCards(client);
+    listState = await readSearchListState(client);
+    currentPage = parsePageNumber(listState.activePageText, currentPage + 1);
+  }
+  if (listState.cardCount <= 0) {
+    throw new Error(`搜索 checkpoint 恢复失败：第 ${currentPage} 页没有可处理卡片。`);
+  }
+  return {
+    currentPageNumber: currentPage,
+    pageCardIndex: Math.max(0, pageCardIndex || 0)
+  };
 }
 
 function parsePageNumber(value, fallback) {

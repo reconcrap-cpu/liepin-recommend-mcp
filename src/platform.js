@@ -485,6 +485,8 @@ export async function runSelfHeal({
   port = DEFAULT_DEBUG_PORT,
   providerCheck = false,
   requireChatPage = false,
+  targetPage = null,
+  requireScreeningConfig = true,
   exportExternalConfig = true,
   externalConfigPath = null,
   agent = null
@@ -502,7 +504,9 @@ export async function runSelfHeal({
     port,
     fix: true,
     providerCheck,
-    requireChatPage
+    requireChatPage,
+    targetPage,
+    requireScreeningConfig
   });
   return {
     ok: doctor.ok,
@@ -605,7 +609,7 @@ export function buildSkillExportPayload({
     externalAgentConfigPath: externalConfigPath,
     commands: {
       install: "node src/cli.js install",
-      doctor: "node src/cli.js doctor --debug-port 9222",
+      doctor: "node src/cli.js doctor --fix --target-page recommend --debug-port 9222",
       selfHeal: "node src/cli.js self-heal",
       providerCheck: "node src/cli.js provider check --mode both"
     },
@@ -627,7 +631,17 @@ export function buildSkillExportPayload({
       optionsTool: TOOL_NAMES.searchOptions,
       startTool: TOOL_NAMES.searchStart,
       requiredStartArgs: ["profile", "job", "criteria", "candidate_limit"],
-      scanLimitDefault: "unset; scan until target candidates or last page"
+      scanLimitDefault: "unset; scan until target candidates or last page",
+      doctorTargetPage: "search"
+    },
+    doctor: {
+      autoFixBeforeStart: true,
+      targetPages: {
+        recommend: "recommend",
+        search: "search",
+        chat: "chat"
+      },
+      manualHelpOnlyFor: ["liepin_login", "liepin_risk_page", "screening_config"]
     },
     target: {
       candidateLimitMeansPassedCandidates: true,
@@ -651,7 +665,7 @@ function buildSkillExportMarkdown(payload = {}) {
     "## Bootstrap",
     "",
     `- Install runtime assets: \`${payload.commands?.install || "node src/cli.js install"}\``,
-    `- Doctor check: \`${payload.commands?.doctor || "node src/cli.js doctor --debug-port 9222"}\``,
+    `- Doctor check: \`${payload.commands?.doctor || "node src/cli.js doctor --fix --target-page recommend --debug-port 9222"}\``,
     `- Self heal: \`${payload.commands?.selfHeal || "node src/cli.js self-heal"}\``,
     `- Provider check: \`${payload.commands?.providerCheck || "node src/cli.js provider check --mode both"}\``,
     "",
@@ -666,6 +680,7 @@ function buildSkillExportMarkdown(payload = {}) {
     "- 启动搜索任务前先调用 `liepin_search_options`，向用户展示快捷搜索 profile 和职位选项。",
     "- 搜索任务必须确认 `profile`、`job`、`criteria`、`candidate_limit` 后再调用 `liepin_search_start`。",
     "- 搜索任务不传 `scan_limit` 时不限制扫描上限，只受目标通过人数或最后一页限制。",
+    "- 启动前 doctor 传 `fix=true` 与对应 `target_page`，自动安装依赖、打开 debug Chrome、导航到目标页；只有登录/风控/配置等无法自动解决的问题才请求用户帮助。",
     "- `candidate_limit` 表示目标通过人选数，不是扫描或处理人数。",
     `- External MCP target override env: \`${externalMcpTargetsEnv}\``,
     `- External skill target override env: \`${externalSkillDirsEnv}\``,

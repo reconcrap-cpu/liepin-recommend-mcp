@@ -80,8 +80,14 @@ function createTools() {
         properties: {
           debug_port: { type: "integer", minimum: 1 },
           fix: { type: "boolean" },
+          auto_fix: { type: "boolean" },
           provider_check: { type: "boolean" },
-          require_chat_page: { type: "boolean" }
+          require_chat_page: { type: "boolean" },
+          target_page: {
+            type: "string",
+            enum: ["recommend", "search", "chat"]
+          },
+          require_screening_config: { type: "boolean" }
         },
         additionalProperties: false
       }
@@ -110,6 +116,11 @@ function createTools() {
           debug_port: { type: "integer", minimum: 1 },
           provider_check: { type: "boolean" },
           require_chat_page: { type: "boolean" },
+          target_page: {
+            type: "string",
+            enum: ["recommend", "search", "chat"]
+          },
+          require_screening_config: { type: "boolean" },
           export_external_config: { type: "boolean" },
           external_config_path: { type: "string" },
           agent: { type: "string" }
@@ -283,7 +294,8 @@ function createTools() {
 }
 
 export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(), {
-  spawnWorker = spawnRunWorker
+  spawnWorker = spawnRunWorker,
+  runDoctorFn = runDoctor
 } = {}) {
   const defaultDebugPort = resolveDefaultDebugPort(workspaceRoot);
   if (!message || message.jsonrpc !== "2.0") {
@@ -330,12 +342,20 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
   const args = params?.arguments || {};
   try {
     if (toolName === TOOL_NAMES.doctor) {
-      const payload = await runDoctor({
+      const fixRequested = Object.hasOwn(args, "fix")
+        ? Boolean(args.fix)
+        : Object.hasOwn(args, "auto_fix")
+          ? Boolean(args.auto_fix)
+          : Boolean(args.target_page || args.require_chat_page);
+      const payload = await runDoctorFn({
         workspaceRoot,
         port: parsePositiveInteger(args.debug_port, defaultDebugPort),
-        fix: Boolean(args.fix),
+        fix: fixRequested,
+        autoFix: args.auto_fix ?? null,
         providerCheck: Boolean(args.provider_check),
-        requireChatPage: Boolean(args.require_chat_page)
+        requireChatPage: Boolean(args.require_chat_page),
+        targetPage: args.target_page || null,
+        requireScreeningConfig: args.require_screening_config ?? true
       });
       return createToolResult(id, payload, !payload.ok);
     }
@@ -358,6 +378,8 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         port: parsePositiveInteger(args.debug_port, defaultDebugPort),
         providerCheck: Boolean(args.provider_check),
         requireChatPage: Boolean(args.require_chat_page),
+        targetPage: args.target_page || null,
+        requireScreeningConfig: args.require_screening_config ?? true,
         exportExternalConfig: args.export_external_config ?? true,
         externalConfigPath: args.external_config_path || null,
         agent: args.agent || null
@@ -391,8 +413,19 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
     }
 
     if (toolName === TOOL_NAMES.recommendFilterOptions) {
+      const port = parsePositiveInteger(args.debug_port, defaultDebugPort);
+      const preflight = await runDoctorFn({
+        workspaceRoot,
+        port,
+        fix: true,
+        targetPage: "recommend",
+        requireScreeningConfig: false
+      });
+      if (!preflight.ok) {
+        return createToolResult(id, createDoctorFailurePayload(preflight, "recommend"), true);
+      }
       const discovery = await discoverRecommendFilters({
-        port: parsePositiveInteger(args.debug_port, defaultDebugPort)
+        port
       }, {
         verify: args.verify ?? false
       });
@@ -413,8 +446,19 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
     }
 
     if (toolName === TOOL_NAMES.searchOptions) {
+      const port = parsePositiveInteger(args.debug_port, defaultDebugPort);
+      const preflight = await runDoctorFn({
+        workspaceRoot,
+        port,
+        fix: true,
+        targetPage: "search",
+        requireScreeningConfig: false
+      });
+      if (!preflight.ok) {
+        return createToolResult(id, createDoctorFailurePayload(preflight, "search"), true);
+      }
       const discovery = await discoverSearchOptions({
-        port: parsePositiveInteger(args.debug_port, defaultDebugPort)
+        port
       }, {
         openJobDropdown: args.open_job_dropdown ?? true
       });
@@ -498,6 +542,15 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
     if (kind) {
       const input = buildStartInput(kind, args, defaultDebugPort);
       assertSideEffectApproval(input);
+      const preflight = await runStartPreflight({
+        workspaceRoot,
+        kind,
+        input,
+        runDoctorFn
+      });
+      if (!preflight.ok) {
+        return createToolResult(id, createDoctorFailurePayload(preflight.doctor, preflight.targetPage), true);
+      }
       const snapshot = createRunSnapshot({
         workspaceRoot,
         kind,
@@ -514,7 +567,12 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         run_id: snapshot.run_id,
         pid: worker.pid,
         state: "queued",
-        workflow: input.workflow
+        workflow: input.workflow,
+        preflight: {
+          ok: true,
+          targetPage: preflight.targetPage,
+          fixes: preflight.doctor?.fixes || []
+        }
       });
     }
 
@@ -528,6 +586,51 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
       }
     }, true);
   }
+}
+
+async function runStartPreflight({
+  workspaceRoot,
+  kind,
+  input,
+  runDoctorFn
+} = {}) {
+  const targetPage = targetPageForStart(kind, input);
+  const doctor = await runDoctorFn({
+    workspaceRoot,
+    port: input.debug_port,
+    fix: true,
+    requireChatPage: targetPage === "chat",
+    targetPage,
+    requireScreeningConfig: !input.mock_llm
+  });
+  return {
+    ok: Boolean(doctor?.ok),
+    targetPage,
+    doctor
+  };
+}
+
+function targetPageForStart(kind, input = {}) {
+  if (kind === RUN_KINDS.SEARCH || input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) return "search";
+  if (
+    kind === RUN_KINDS.CHAT
+    || input.workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING
+    || input.workflow === RUN_WORKFLOWS.CHAT_SAMPLE
+  ) {
+    return "chat";
+  }
+  return "recommend";
+}
+
+function createDoctorFailurePayload(doctor, targetPage) {
+  return {
+    status: "FAILED",
+    error: {
+      code: "DOCTOR_FAILED",
+      message: `启动前检查未通过；已自动处理可修复项，仍需人工处理剩余问题。目标页面：${targetPage || doctor?.targetPage || "recommend"}。`
+    },
+    doctor
+  };
 }
 
 function buildStartInput(kind, args = {}, defaultDebugPort = DEFAULT_DEBUG_PORT) {

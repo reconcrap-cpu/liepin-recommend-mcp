@@ -9,6 +9,7 @@ import {
 import { getWorkspaceRoot, readScreeningConfig } from "./config.js";
 import {
   appendRunEvent,
+  getRunArtifactPaths,
   markRunCanceled,
   markRunCompleted,
   markRunFailed,
@@ -44,7 +45,7 @@ import {
   runSearchChatChain,
   summarizeSearchChatChain
 } from "./liepin/search-chat-chain.js";
-import { normalizeText, parsePositiveInteger } from "./utils.js";
+import { normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
 
 export async function runWorker({
   workspaceRoot = getWorkspaceRoot(),
@@ -63,6 +64,7 @@ export async function runWorker({
     markRunCanceled(workspaceRoot, runId, { reason: "cancelled_before_start" });
     return;
   }
+  const selectedWorkflow = normalizeText(snapshot.input?.workflow) || legacyWorkflowForKind(snapshot.kind);
 
   markRunRunning(workspaceRoot, runId);
   appendRunEvent(readRunState(workspaceRoot, runId), "worker_started", {
@@ -70,10 +72,9 @@ export async function runWorker({
   });
 
   let lastPartialWorkflowResult = null;
-  const onProgress = (event = {}) => {
-    updateRunProgress(workspaceRoot, runId, event);
-    if (event.partialResult) {
-      lastPartialWorkflowResult = event.partialResult;
+  const checkRunControl = (partialResult = null) => {
+    if (partialResult) {
+      lastPartialWorkflowResult = partialResult;
     }
     const current = readRunState(workspaceRoot, runId);
     if (current?.control?.cancel_requested) {
@@ -91,6 +92,17 @@ export async function runWorker({
       });
     }
   };
+  const onProgress = (event = {}) => {
+    updateRunProgress(workspaceRoot, runId, event);
+    if (event.partialResult) {
+      lastPartialWorkflowResult = event.partialResult;
+    }
+    if (selectedWorkflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) return;
+    checkRunControl(lastPartialWorkflowResult);
+  };
+  const onSafeControlPoint = (partialResult = null) => {
+    checkRunControl(partialResult || lastPartialWorkflowResult);
+  };
 
   try {
     if (snapshot.control?.pause_requested) {
@@ -102,7 +114,8 @@ export async function runWorker({
       workspaceRoot,
       snapshot,
       executors,
-      onProgress
+      onProgress,
+      onSafeControlPoint
     });
     markRunCompleted(workspaceRoot, runId, result);
   } catch (error) {
@@ -132,7 +145,8 @@ export async function executeWorkflow({
   workspaceRoot,
   snapshot,
   executors = createDefaultExecutors(),
-  onProgress = null
+  onProgress = null,
+  onSafeControlPoint = null
 }) {
   const input = snapshot.input || {};
   const workflow = normalizeText(input.workflow) || legacyWorkflowForKind(snapshot.kind);
@@ -277,6 +291,8 @@ export async function executeWorkflow({
 
   if (workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) {
     const llm = resolveSearchChatChainLlm(workspaceRoot, input);
+    const artifacts = snapshot.artifacts || getRunArtifactPaths(workspaceRoot, snapshot.run_id);
+    const checkpoint = readJsonFile(artifacts.checkpointPath, null);
     const result = await executors.searchChatChain({ port }, {
       candidateLimit: parsePositiveInteger(input.candidate_limit, 5),
       scanLimit: parsePositiveInteger(input.scan_limit, null),
@@ -289,6 +305,11 @@ export async function executeWorkflow({
       operatorFilter: normalizeText(input.filter) || null,
       config: llm.config,
       provider: llm.provider,
+      checkpoint,
+      onCheckpoint: async (checkpointPayload) => {
+        writeJsonFile(artifacts.checkpointPath, checkpointPayload);
+      },
+      onSafeControlPoint,
       onProgress
     });
     return {

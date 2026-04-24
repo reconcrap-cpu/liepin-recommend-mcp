@@ -1,6 +1,6 @@
 {
   "name": "@reconcrap/liepin-mcp",
-  "version": "0.1.9",
+  "version": "0.1.11",
   "description": "Liepin recommend/chat MCP pipeline with phased development guardrails",
   "type": "module",
   "main": "src/index.js",

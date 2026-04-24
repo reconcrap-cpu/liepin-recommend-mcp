@@ -89,7 +89,9 @@ export const ARTIFACT_FILES = {
   llmRequest: "llm-request.json",
   decision: "decision.json",
   coverage: "coverage.json",
-  reasoning: "reasoning.log"
+  reasoning: "reasoning.log",
+  csv: "screening-report.csv",
+  checkpoint: "checkpoint.json"
 };
 
 export const RESEARCH_FILES = {

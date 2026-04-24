@@ -1,3 +1,8 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { DEFAULT_DEBUG_PORT, LIEPIN_URLS } from "./constants.js";
 import { normalizeText, parsePositiveInteger, sleep } from "./utils.js";
 
@@ -31,6 +36,13 @@ export async function listTargets({ port = DEFAULT_DEBUG_PORT } = {}) {
   const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
   const browserURL = `http://127.0.0.1:${resolvedPort}`;
   return getJson(`${browserURL}/json/list`);
+}
+
+export function getLiepinTargetUrl(kind) {
+  const normalized = normalizeText(kind).toLowerCase();
+  if (normalized === "chat") return LIEPIN_URLS.chat;
+  if (normalized === "search") return LIEPIN_URLS.search;
+  return LIEPIN_URLS.recommend;
 }
 
 export function classifyLiepinPage(url) {
@@ -71,6 +83,170 @@ export async function discoverLiepinPages({ port = DEFAULT_DEBUG_PORT } = {}) {
   };
 }
 
+export async function ensureLiepinTargetPage({
+  port = DEFAULT_DEBUG_PORT,
+  targetPage = "recommend",
+  timeoutMs = 15000
+} = {}) {
+  const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
+  const normalizedTarget = normalizeLiepinTargetPage(targetPage);
+  const url = getLiepinTargetUrl(normalizedTarget);
+  const before = await discoverLiepinPages({ port: resolvedPort });
+  if (before[normalizedTarget]) {
+    return {
+      ok: true,
+      changed: false,
+      targetPage: normalizedTarget,
+      url,
+      page: before[normalizedTarget],
+      reason: "already_open"
+    };
+  }
+  if (before.riskPage && !hasAnyWorkflowPage(before)) {
+    return {
+      ok: false,
+      changed: false,
+      targetPage: normalizedTarget,
+      url,
+      blocked: true,
+      reason: "risk_page",
+      page: before.riskPage
+    };
+  }
+
+  const navigation = await navigateExistingOrOpenNewTarget({
+    port: resolvedPort,
+    pages: before,
+    url
+  });
+  const page = await waitForLiepinPageKind({
+    port: resolvedPort,
+    kind: normalizedTarget,
+    timeoutMs
+  });
+  return {
+    ok: Boolean(page),
+    changed: true,
+    targetPage: normalizedTarget,
+    url,
+    page,
+    navigation,
+    reason: page ? "navigated" : "target_not_found_after_navigation"
+  };
+}
+
+export async function launchChromeDebug({
+  port = DEFAULT_DEBUG_PORT,
+  url = LIEPIN_URLS.recommend,
+  userDataDir = null,
+  chromePath = null,
+  waitTimeoutMs = 15000
+} = {}) {
+  const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
+  const executablePath = chromePath || findChromeExecutable();
+  if (!executablePath) {
+    return {
+      ok: false,
+      port: resolvedPort,
+      error: {
+        code: "CHROME_EXECUTABLE_NOT_FOUND",
+        message: "未找到 Chrome 可执行文件，无法自动打开 debug Chrome。"
+      }
+    };
+  }
+  const resolvedUserDataDir = userDataDir || path.join(os.homedir(), ".liepin-recommend-mcp", `chrome-debug-profile-${resolvedPort}`);
+  const args = [
+    `--remote-debugging-port=${resolvedPort}`,
+    `--user-data-dir=${resolvedUserDataDir}`,
+    "--no-first-run",
+    "--no-default-browser-check"
+  ];
+  if (normalizeText(url)) args.push(url);
+  try {
+    fs.mkdirSync(resolvedUserDataDir, { recursive: true });
+    const child = spawn(executablePath, args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false
+    });
+    child.unref();
+    const connection = await waitForChromeConnection({
+      port: resolvedPort,
+      timeoutMs: waitTimeoutMs
+    });
+    return {
+      ok: connection.ok,
+      port: resolvedPort,
+      pid: child.pid,
+      executablePath,
+      userDataDir: resolvedUserDataDir,
+      error: connection.ok ? null : connection.error
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      port: resolvedPort,
+      executablePath,
+      userDataDir: resolvedUserDataDir,
+      error: {
+        code: "CHROME_LAUNCH_FAILED",
+        message: error?.message || String(error)
+      }
+    };
+  }
+}
+
+export async function waitForChromeConnection({
+  port = DEFAULT_DEBUG_PORT,
+  timeoutMs = 15000,
+  pollMs = 300
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await connectToChrome({ port });
+    if (last.ok) return last;
+    await sleep(pollMs);
+  }
+  return last || await connectToChrome({ port });
+}
+
+export function findChromeExecutable({
+  platform = process.platform,
+  env = process.env,
+  exists = fs.existsSync
+} = {}) {
+  const candidates = [];
+  const pathApi = platform === "win32" ? path.win32 : path;
+  if (env.CHROME_PATH) candidates.push(env.CHROME_PATH);
+  if (env.GOOGLE_CHROME_BIN) candidates.push(env.GOOGLE_CHROME_BIN);
+  if (platform === "win32") {
+    const programFiles = [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], env.LOCALAPPDATA].filter(Boolean);
+    for (const base of programFiles) {
+      candidates.push(pathApi.join(base, "Google", "Chrome", "Application", "chrome.exe"));
+    }
+    candidates.push("chrome.exe");
+  } else if (platform === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      pathApi.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+      "google-chrome",
+      "chrome"
+    );
+  } else {
+    candidates.push("google-chrome", "google-chrome-stable", "chromium", "chromium-browser");
+  }
+  return candidates.find((candidate) => {
+    if (!candidate) return false;
+    if (!pathApi.isAbsolute(candidate)) return true;
+    try {
+      return exists(candidate);
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
 export async function waitForTarget({ port = DEFAULT_DEBUG_PORT, knownTargetIds = [], match, timeoutMs = 8000, pollMs = 250 } = {}) {
   const deadline = Date.now() + timeoutMs;
   const known = new Set(knownTargetIds);
@@ -84,6 +260,68 @@ export async function waitForTarget({ port = DEFAULT_DEBUG_PORT, knownTargetIds 
     await sleep(pollMs);
   }
   return null;
+}
+
+async function navigateExistingOrOpenNewTarget({ port, pages, url }) {
+  const source = pages.recommend || pages.search || pages.chat || pages.resumeDetail || pages.all?.find((item) => item.kind === "other");
+  if (source?.webSocketDebuggerUrl) {
+    const client = await createPageClient(source);
+    try {
+      await client.send("Page.enable").catch(() => null);
+      await client.send("Page.navigate", { url });
+      return {
+        mode: "navigate_existing",
+        sourceTargetId: source.id,
+        url
+      };
+    } catch (error) {
+      return openNewTarget({ port, url, fallbackError: error });
+    } finally {
+      await client.disconnect().catch(() => null);
+    }
+  }
+  return openNewTarget({ port, url });
+}
+
+async function openNewTarget({ port, url, fallbackError = null }) {
+  const browserURL = `http://127.0.0.1:${parsePositiveInteger(port, DEFAULT_DEBUG_PORT)}`;
+  const endpoint = `${browserURL}/json/new?${encodeURIComponent(url)}`;
+  try {
+    const target = await putJson(endpoint);
+    return {
+      mode: "open_new",
+      targetId: target?.id || null,
+      url
+    };
+  } catch (error) {
+    return {
+      mode: "open_new_failed",
+      url,
+      error: error?.message || String(error),
+      fallbackError: fallbackError?.message || null
+    };
+  }
+}
+
+async function waitForLiepinPageKind({ port, kind, timeoutMs = 15000, pollMs = 300 }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pages = await discoverLiepinPages({ port });
+    if (pages[kind]) return pages[kind];
+    await sleep(pollMs);
+  }
+  return null;
+}
+
+function hasAnyWorkflowPage(pages = {}) {
+  return Boolean(pages.recommend || pages.search || pages.chat || pages.resumeDetail);
+}
+
+function normalizeLiepinTargetPage(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  if (normalized === "chat") return "chat";
+  if (normalized === "search") return "search";
+  return "recommend";
 }
 
 export async function createPageClient(targetOrWsUrl) {
@@ -260,6 +498,14 @@ export function isCdpRuntimeTimeoutError(error) {
 
 async function getJson(url) {
   const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}
+
+async function putJson(url) {
+  const response = await fetch(url, { method: "PUT" });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }

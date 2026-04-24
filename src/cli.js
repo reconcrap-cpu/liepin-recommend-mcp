@@ -122,7 +122,12 @@ export async function runCli(argv = process.argv.slice(2)) {
       port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], defaultDebugPort),
       fix: Boolean(rootFlags.fix),
       providerCheck: Boolean(rootFlags["provider-check"] || rootFlags.providerCheck),
-      requireChatPage: Boolean(rootFlags["require-chat-page"] || rootFlags.requireChatPage)
+      requireChatPage: Boolean(rootFlags["require-chat-page"] || rootFlags.requireChatPage),
+      targetPage: normalizeText(rootFlags["target-page"] || rootFlags.targetPage) || null,
+      requireScreeningConfig: parseOptionalBoolean(
+        rootFlags["require-screening-config"] || rootFlags.requireScreeningConfig,
+        true
+      )
     });
     printJson(result);
     if (!result.ok) process.exitCode = 1;
@@ -159,6 +164,11 @@ export async function runCli(argv = process.argv.slice(2)) {
       port: parsePositiveInteger(rootFlags.debugPort || rootFlags["debug-port"], defaultDebugPort),
       providerCheck: Boolean(rootFlags["provider-check"] || rootFlags.providerCheck),
       requireChatPage: Boolean(rootFlags["require-chat-page"] || rootFlags.requireChatPage),
+      targetPage: normalizeText(rootFlags["target-page"] || rootFlags.targetPage) || null,
+      requireScreeningConfig: parseOptionalBoolean(
+        rootFlags["require-screening-config"] || rootFlags.requireScreeningConfig,
+        true
+      ),
       exportExternalConfig: parseOptionalBoolean(
         rootFlags["export-external-config"] || rootFlags.exportExternalConfig,
         true
@@ -227,6 +237,26 @@ export async function runCli(argv = process.argv.slice(2)) {
       allowChatAction: Boolean(input.allow_chat_action),
       allowRequestResume: Boolean(input.allow_request_resume)
     });
+    const preflight = await runDoctor({
+      workspaceRoot,
+      port: input.debug_port,
+      fix: true,
+      requireChatPage: targetPageForCliStart(command, input) === "chat",
+      targetPage: targetPageForCliStart(command, input),
+      requireScreeningConfig: !input.mock_llm
+    });
+    if (!preflight.ok) {
+      printJson({
+        status: "FAILED",
+        error: {
+          code: "DOCTOR_FAILED",
+          message: `启动前检查未通过；已自动处理可修复项，仍需人工处理剩余问题。目标页面：${preflight.targetPage}。`
+        },
+        doctor: preflight
+      });
+      process.exitCode = 1;
+      return;
+    }
     const snapshot = createRunSnapshot({
       workspaceRoot,
       kind: command,
@@ -244,6 +274,11 @@ export async function runCli(argv = process.argv.slice(2)) {
       pid: worker.pid,
       state: snapshot.state,
       workflow: input.workflow,
+      preflight: {
+        ok: true,
+        targetPage: preflight.targetPage,
+        fixes: preflight.fixes || []
+      },
       note: "已创建异步 run；使用 runs status/list 查看进度。"
     });
     return;
@@ -935,9 +970,9 @@ function buildHelp() {
     "liepin-mcp commands",
     "",
     "  start",
-    "  doctor [--debug-port 9222] [--fix] [--provider-check] [--require-chat-page]",
+    "  doctor [--debug-port 9222] [--fix] [--provider-check] [--require-chat-page] [--target-page recommend|search|chat]",
     "  install [--agent trae-cn|openclaw|cursor|trae|claude|all] [--write-config-template true|false] [--overwrite-config-template] [--export-external-config true|false] [--external-config-path <path>]",
-    "  self-heal [--agent trae-cn|openclaw|cursor|trae|claude|all] [--debug-port 9222] [--provider-check] [--require-chat-page] [--export-external-config true|false] [--external-config-path <path>]",
+    "  self-heal [--agent trae-cn|openclaw|cursor|trae|claude|all] [--debug-port 9222] [--provider-check] [--require-chat-page] [--target-page recommend|search|chat] [--export-external-config true|false] [--external-config-path <path>]",
     "  skill export [--format markdown|json] [--output <path>]",
     "  external-agent config [--output <path>]",
     "  external-agent-config [--output <path>]",
@@ -976,6 +1011,18 @@ function buildHelp() {
     "  research parse-survey --file <cv-structure-survey.json>",
     "  research audit-payload --file <cv-structure-survey.json> [--limit 10]"
   ].join("\n");
+}
+
+function targetPageForCliStart(kind, input = {}) {
+  if (kind === RUN_KINDS.SEARCH || input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) return "search";
+  if (
+    kind === RUN_KINDS.CHAT
+    || input.workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING
+    || input.workflow === RUN_WORKFLOWS.CHAT_SAMPLE
+  ) {
+    return "chat";
+  }
+  return "recommend";
 }
 
 function spawnWorkerProcess({ workspaceRoot, runId }) {

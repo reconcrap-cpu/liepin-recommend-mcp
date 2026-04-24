@@ -12,6 +12,7 @@ import {
   toIsoNow,
   writeJsonFile
 } from "./utils.js";
+import { writeScreeningCsvReport } from "./liepin/screening-report.js";
 
 export function createRunId(kind = "run") {
   const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -37,7 +38,9 @@ export function getRunArtifactPaths(workspaceRoot, runId) {
     llmRequestPath: path.join(runDir, ARTIFACT_FILES.llmRequest),
     decisionPath: path.join(runDir, ARTIFACT_FILES.decision),
     coveragePath: path.join(runDir, ARTIFACT_FILES.coverage),
-    reasoningPath: path.join(runDir, ARTIFACT_FILES.reasoning)
+    reasoningPath: path.join(runDir, ARTIFACT_FILES.reasoning),
+    csvPath: path.join(runDir, ARTIFACT_FILES.csv),
+    checkpointPath: path.join(runDir, ARTIFACT_FILES.checkpoint)
   };
 }
 
@@ -314,16 +317,24 @@ export function buildRunStatusPayload(snapshot, { full = false } = {}) {
 
 export function persistRunWorkflowArtifacts(workspaceRoot, runId, workflowResult = {}) {
   const artifacts = getRunArtifactPaths(workspaceRoot, runId);
+  const currentSnapshot = readJsonFile(artifacts.runJsonPath, null);
   const payloads = buildWorkflowArtifactPayloads(workflowResult);
   writeJsonFile(artifacts.screenInputPath, payloads.screenInput);
   writeJsonFile(artifacts.llmRequestPath, payloads.llmRequest);
   writeJsonFile(artifacts.decisionPath, payloads.decision);
   writeJsonFile(artifacts.coveragePath, payloads.coverage);
+  const csvPath = writeScreeningCsvReport({
+    targetPath: artifacts.csvPath,
+    workflowResult,
+    input: currentSnapshot?.input || {}
+  });
   return {
     screenInputPath: artifacts.screenInputPath,
     llmRequestPath: artifacts.llmRequestPath,
     decisionPath: artifacts.decisionPath,
     coveragePath: artifacts.coveragePath,
+    csvPath,
+    checkpointPath: artifacts.checkpointPath,
     itemCount: payloads.itemCount,
     workflow: payloads.workflow
   };
@@ -359,7 +370,10 @@ export function buildWorkflowArtifactPayloads(workflowResult = {}) {
         rowKey: item.rowKey || item.chatState?.rowKey || item.candidate?.resumeId || "",
         llmRequest: item.llmRequest || null,
         recommendLlmRequest: item.recommendLlmRequest || null,
-        chatLlmRequest: item.chatLlmRequest || null
+        chatLlmRequest: item.chatLlmRequest || null,
+        reasoningCaptured: item.reasoningCaptured === true,
+        recommendReasoningCaptured: item.recommendReasoningCaptured === true,
+        chatReasoningCaptured: item.chatReasoningCaptured === true
       }))
     },
     decision: {
