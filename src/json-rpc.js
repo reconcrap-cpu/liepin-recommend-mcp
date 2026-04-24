@@ -26,6 +26,10 @@ import {
 } from "./liepin/recommend-filter-discovery.js";
 import { describeRecommendFilterOptions } from "./liepin/recommend-filter-executor.js";
 import {
+  discoverSearchOptions,
+  summarizeSearchOptions
+} from "./liepin/search-options.js";
+import {
   buildRunStatusPayload,
   clearPauseRequest,
   createRunSnapshot,
@@ -169,8 +173,25 @@ function createTools() {
         additionalProperties: false
       }
     },
+    {
+      name: TOOL_NAMES.searchOptions,
+      description: [
+        "List available Liepin search-page quick search profiles and job choices for the operator.",
+        "Call this before asking the user for liepin_search_start `profile` and `job`.",
+        "The tool also reports checked job conditions in the selected-job dropdown so operators can verify the search workflow will clear them before scanning."
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        properties: {
+          debug_port: { type: "integer", minimum: 1 },
+          open_job_dropdown: { type: "boolean" }
+        },
+        additionalProperties: false
+      }
+    },
     ...Object.entries({
       [TOOL_NAMES.recommendStart]: RUN_KINDS.RECOMMEND,
+      [TOOL_NAMES.searchStart]: RUN_KINDS.SEARCH,
       [TOOL_NAMES.chatStart]: RUN_KINDS.CHAT,
       [TOOL_NAMES.recommendChatStart]: RUN_KINDS.RECOMMEND_CHAT
     }).map(([name]) => ({
@@ -203,6 +224,16 @@ function createTools() {
             type: "string",
             description: "Liepin page filters, not screening criteria. Supports JSON or natural language. Examples: 沿用页面当前筛选; 学历=本科、硕士; 年龄=22-30; 院校=985、211."
           },
+          profile: {
+            type: "string",
+            description: "Liepin search quick-search profile title. Call liepin_search_options first and pass one of its profiles."
+          },
+          search_profile: { type: "string" },
+          job: {
+            type: "string",
+            description: "Liepin job title for search page selected-job cleanup and the communication job modal. Call liepin_search_options first and pass one of its jobs."
+          },
+          job_title: { type: "string" },
           criteria: { type: "string" },
           recommend_criteria: { type: "string" },
           chat_criteria: { type: "string" },
@@ -381,6 +412,29 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
       return createToolResult(id, payload, !discovery.passed && args.verify === true);
     }
 
+    if (toolName === TOOL_NAMES.searchOptions) {
+      const discovery = await discoverSearchOptions({
+        port: parsePositiveInteger(args.debug_port, defaultDebugPort)
+      }, {
+        openJobDropdown: args.open_job_dropdown ?? true
+      });
+      const payload = {
+        status: "OK",
+        summary: summarizeSearchOptions(discovery),
+        searchUsage: {
+          requiredStartArgs: ["profile", "job", "criteria", "candidate_limit"],
+          profileSource: "profiles[].title",
+          jobSource: "jobs[].title",
+          note: "search_start 会先选择 job 并清空职位下拉里的 checked 条件，再点击 profile 开始扫描。"
+        },
+        profiles: discovery.profiles,
+        jobs: discovery.jobs,
+        checkedJobConditions: discovery.checkedJobConditions,
+        discovery
+      };
+      return createToolResult(id, payload, !discovery.passed);
+    }
+
     if (toolName === TOOL_NAMES.runStatus) {
       const run = readRunState(workspaceRoot, args.run_id);
       return createToolResult(id, run
@@ -437,6 +491,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
 
     const kind = {
       [TOOL_NAMES.recommendStart]: RUN_KINDS.RECOMMEND,
+      [TOOL_NAMES.searchStart]: RUN_KINDS.SEARCH,
       [TOOL_NAMES.chatStart]: RUN_KINDS.CHAT,
       [TOOL_NAMES.recommendChatStart]: RUN_KINDS.RECOMMEND_CHAT
     }[toolName];
@@ -544,6 +599,30 @@ function buildStartInput(kind, args = {}, defaultDebugPort = DEFAULT_DEBUG_PORT)
         : Boolean(args.allow_request_resume)
     };
   }
+  if (kind === RUN_KINDS.SEARCH) {
+    return {
+      ...base,
+      workflow: args.workflow || RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
+      profile: args.profile || args.search_profile || null,
+      job: args.job || args.job_title || null,
+      candidate_limit: args.candidate_limit || args.sample_limit || 5,
+      scan_limit: args.scan_limit || null,
+      start_index: args.start_index || 0,
+      step_delay_ms: args.step_delay_ms || 3500,
+      max_chars: args.max_chars || null,
+      filter: args.filter || null,
+      criteria: args.criteria || args.recommend_criteria || null,
+      mock_decision: args.mock_decision || args.mock_recommend_decision || "pass",
+      mock_post_action: args.mock_post_action || args.mock_recommend_post_action || "chat",
+      mock_recommend_decision: args.mock_recommend_decision || args.mock_decision || "pass",
+      mock_recommend_post_action: args.mock_recommend_post_action || args.mock_post_action || "chat",
+      execute_request_resume: false,
+      allow_chat_action: args.allow_chat_action === undefined
+        ? true
+        : Boolean(args.allow_chat_action),
+      allow_request_resume: false
+    };
+  }
   return {
     ...base,
     workflow: args.workflow || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
@@ -575,6 +654,11 @@ function assertSideEffectApproval(input = {}) {
   if (input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN && !input.allow_chat_action) {
     throw createSideEffectError(
       "recommend_chat_chain 会点击推荐沟通按钮；请显式传入 allow_chat_action。"
+    );
+  }
+  if (input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN && !input.allow_chat_action) {
+    throw createSideEffectError(
+      "search_chat_chain 会点击搜索页立即沟通按钮；请显式传入 allow_chat_action。"
     );
   }
   if (

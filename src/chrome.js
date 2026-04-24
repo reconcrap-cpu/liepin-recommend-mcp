@@ -38,6 +38,7 @@ export function classifyLiepinPage(url) {
   if (!normalized) return "other";
   if (isLiepinRiskPageUrl(normalized)) return "risk";
   if (normalized.includes(LIEPIN_URLS.recommend)) return "recommend";
+  if (normalized.includes(LIEPIN_URLS.search)) return "search";
   if (normalized.includes(LIEPIN_URLS.chat)) return "chat";
   if (normalized.includes(LIEPIN_URLS.resumeDetailFragment)) return "resume_detail";
   return "other";
@@ -62,6 +63,7 @@ export async function discoverLiepinPages({ port = DEFAULT_DEBUG_PORT } = {}) {
   }));
   return {
     recommend: mapped.find((item) => item.kind === "recommend") || null,
+    search: mapped.find((item) => item.kind === "search") || null,
     chat: mapped.find((item) => item.kind === "chat") || null,
     resumeDetail: mapped.find((item) => item.kind === "resume_detail") || null,
     riskPage: mapped.find((item) => item.kind === "risk") || null,

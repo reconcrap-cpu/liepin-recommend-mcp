@@ -33,3 +33,26 @@ export const resumeDetailSelectors = {
   openImButton: '[class*="xpath-open-im-btn"]',
   portfolioWrap: '[class*="xpath-portfolio-wrap"]'
 };
+
+export const searchSelectors = {
+  listBox: ".xpath-resume-list-box",
+  cardWrap: ".xpath-resume-list-box ul > li",
+  cardContent: ".xpath-resume-list-box ul > li .xpath-resume-card",
+  modalRoot: '[class*="resume-detail-modal-wrap"]',
+  modalPrintable: '[class*="resume-detail-modal-wrap"] .resume-detail-content-body.printable-content',
+  modalCloseButton: '[class*="resume-detail-modal-wrap"] [class*="closeBtn"] [class*="antlpticon-close"], [class*="resume-detail-modal-wrap"] [class*="closeBtn"]',
+  openChatButton: '[class*="resume-detail-modal-wrap"] #res_detail_operation_for_guide [class*="xpath-open-im-btn"], [class*="resume-detail-modal-wrap"] [class*="xpath-open-im-btn"]',
+  selectedJobWrap: ".selectJobWrap--Kwt2i",
+  selectedJobTrigger: ".selectJobWrap--Kwt2i .ant-lpt-dropdown-trigger, .selectJobWrap--Kwt2i .dropdown-button",
+  selectedJobDropdown: ".search-page-select-jobs-dropdown",
+  selectedJobDropdownOpen: ".search-page-select-jobs-dropdown:not(.ant-lpt-dropdown-hidden)",
+  searchJobInput: ".searchJobCompanyBox--TnpGe .wrap--IS4Du .job-input, .searchJobCompanyBox--TnpGe .wrap--IS4Du .ant-lpt-select",
+  quickSearchRoot: ".filterContentBox--FSZIQ > div:nth-child(1)",
+  quickProfileTag: ".saved-condition-tag-root",
+  quickProfileTitle: 'span[class*="tagTitle--"], [class*="tagTitle--"]',
+  serviceJobContainer: '[id^="serviceJobListContainer"]',
+  serviceJobRow: '[id^="serviceJobListContainer"] [class*="jobListWrap"] li',
+  pagebar: ".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul",
+  nextPageButton: ".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul > li.ant-lpt-pagination-next",
+  disabledNextPageButton: ".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul > li.ant-lpt-pagination-next.ant-lpt-pagination-disabled"
+};

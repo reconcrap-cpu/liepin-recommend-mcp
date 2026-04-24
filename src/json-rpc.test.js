@@ -24,10 +24,15 @@ test("tools/list exposes liepin-prefixed tools", async () => {
   assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.externalAgentConfig), true);
   assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.providerCheck), true);
   assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.recommendFilterOptions), true);
+  assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.searchOptions), true);
+  assert.equal(response.result.tools.some((tool) => tool.name === TOOL_NAMES.searchStart), true);
   const recommendChatTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.recommendChatStart);
   assert.equal(recommendChatTool.inputSchema.properties.allow_chat_action.type, "boolean");
   assert.equal(recommendChatTool.inputSchema.properties.allow_request_resume.type, "boolean");
   assert.equal(recommendChatTool.inputSchema.properties.candidate_limit.description.includes("pass"), true);
+  const searchTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.searchStart);
+  assert.equal(searchTool.inputSchema.properties.profile.type, "string");
+  assert.equal(searchTool.inputSchema.properties.job.type, "string");
 });
 
 test("run status returns compact run payload by default", async () => {
@@ -134,6 +139,48 @@ test("chat start defaults to production chain over JSON-RPC", async () => {
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
   assert.equal(payload.workflow, RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN);
+});
+
+test("search start defaults to search chat chain over JSON-RPC", async () => {
+  const response = await handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 9,
+    method: "tools/call",
+    params: {
+      name: TOOL_NAMES.searchStart,
+      arguments: {
+        mock_llm: true,
+        profile: "测试",
+        job: "招聘实习生",
+        candidate_limit: 1
+      }
+    }
+  }, process.cwd(), { spawnWorker: stubWorker });
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, false);
+  assert.equal(payload.status, "ACCEPTED");
+  assert.equal(payload.workflow, RUN_WORKFLOWS.SEARCH_CHAT_CHAIN);
+});
+
+test("search start rejects when chat action is not allowed", async () => {
+  const response = await handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 10,
+    method: "tools/call",
+    params: {
+      name: TOOL_NAMES.searchStart,
+      arguments: {
+        mock_llm: true,
+        profile: "测试",
+        job: "招聘实习生",
+        candidate_limit: 1,
+        allow_chat_action: false
+      }
+    }
+  }, process.cwd(), { spawnWorker: stubWorker });
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, true);
+  assert.equal(payload.error.code, "SIDE_EFFECT_APPROVAL_REQUIRED");
 });
 
 test("doctor uses configured debugPort when debug_port is omitted", async () => {

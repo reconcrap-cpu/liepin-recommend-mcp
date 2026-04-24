@@ -40,6 +40,10 @@ import {
   runRecommendChatChain,
   summarizeRecommendChatChain
 } from "./liepin/recommend-chat-chain.js";
+import {
+  runSearchChatChain,
+  summarizeSearchChatChain
+} from "./liepin/search-chat-chain.js";
 import { normalizeText, parsePositiveInteger } from "./utils.js";
 
 export async function runWorker({
@@ -271,6 +275,29 @@ export async function executeWorkflow({
     };
   }
 
+  if (workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) {
+    const llm = resolveSearchChatChainLlm(workspaceRoot, input);
+    const result = await executors.searchChatChain({ port }, {
+      candidateLimit: parsePositiveInteger(input.candidate_limit, 5),
+      scanLimit: parsePositiveInteger(input.scan_limit, null),
+      profile: normalizeText(input.profile || input.search_profile) || null,
+      jobTitle: normalizeText(input.job || input.job_title) || null,
+      startIndex: parseNonNegativeInteger(input.start_index, 0),
+      stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      criteria: normalizeText(input.criteria || input.recommend_criteria) || null,
+      operatorFilter: normalizeText(input.filter) || null,
+      config: llm.config,
+      provider: llm.provider,
+      onProgress
+    });
+    return {
+      workflow,
+      summary: summarizeSearchChatChain(result),
+      result
+    };
+  }
+
   throw new Error(`Unsupported run workflow: ${workflow || "(empty)"}`);
 }
 
@@ -281,6 +308,12 @@ function assertSideEffectApproval(workflow, input = {}) {
     throw createWorkflowError(
       "SIDE_EFFECT_APPROVAL_REQUIRED",
       "recommend_chat_chain 会点击推荐沟通按钮；如需正式串联请允许 allow_chat_action，或改用 dry-run workflow。"
+    );
+  }
+  if (workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN && !allowChatAction) {
+    throw createWorkflowError(
+      "SIDE_EFFECT_APPROVAL_REQUIRED",
+      "search_chat_chain 会点击搜索页立即沟通按钮；如需正式串联请允许 allow_chat_action。"
     );
   }
   if (
@@ -309,7 +342,8 @@ export function createDefaultExecutors() {
     recommendDryRun: runRecommendDryRunScreening,
     chatDryRun: runChatDryRunScreening,
     recommendFilters: executeRecommendFilters,
-    recommendChatChain: runRecommendChatChain
+    recommendChatChain: runRecommendChatChain,
+    searchChatChain: runSearchChatChain
   };
 }
 
@@ -317,6 +351,7 @@ function legacyWorkflowForKind(kind) {
   if (kind === RUN_KINDS.RECOMMEND) return RUN_WORKFLOWS.RECOMMEND_SAMPLE;
   if (kind === RUN_KINDS.CHAT) return RUN_WORKFLOWS.CHAT_SAMPLE;
   if (kind === RUN_KINDS.RECOMMEND_CHAT) return RUN_WORKFLOWS.CV_SURVEY;
+  if (kind === RUN_KINDS.SEARCH) return RUN_WORKFLOWS.SEARCH_CHAT_CHAIN;
   return "";
 }
 
@@ -376,6 +411,22 @@ function resolveRecommendChatChainLlm(workspaceRoot, input) {
     recommendProvider: null,
     chatProvider: null
   };
+}
+
+function resolveSearchChatChainLlm(workspaceRoot, input) {
+  if (input.mock_llm) {
+    return {
+      config: {
+        model: normalizeText(input.mock_model) || "mock-search-chat-chain"
+      },
+      provider: buildMockRecommendScreeningProvider({
+        decision: normalizeText(input.mock_recommend_decision || input.mock_decision) || "pass",
+        postAction: normalizeText(input.mock_recommend_post_action || input.mock_post_action) || "chat",
+        reasoningText: normalizeText(input.mock_reasoning)
+      })
+    };
+  }
+  return resolveRequiredConfig(workspaceRoot);
 }
 
 function resolveRequiredConfig(workspaceRoot) {

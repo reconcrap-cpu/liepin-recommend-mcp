@@ -345,7 +345,8 @@ export function buildWorkflowArtifactPayloads(workflowResult = {}) {
         rowKey: item.rowKey || item.chatState?.rowKey || item.candidate?.resumeId || "",
         candidateLabel: item.candidateLabel || item.candidate?.name || item.candidate?.label || item.beforeState?.rowText || item.rowText || "",
         textHash: item.textHash || item.candidate?.textHash || "",
-        manifest: item.manifest || item.chatInputManifest || item.recommendInputManifest || null,
+        manifest: item.manifest || item.inputManifest || item.chatInputManifest || item.recommendInputManifest || null,
+        inputManifest: item.inputManifest || null,
         recommendInputManifest: item.recommendInputManifest || null,
         chatInputManifest: item.chatInputManifest || null
       }))

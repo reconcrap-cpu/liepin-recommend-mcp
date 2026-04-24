@@ -110,6 +110,64 @@ test("runWorker defaults recommend-chat chain to production approvals", async ()
   });
 });
 
+test("runWorker executes search chat-chain workflow with injected executor", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.SEARCH,
+      phase: "P30",
+      input: {
+        workflow: RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
+        mock_llm: true,
+        profile: "测试",
+        job: "招聘实习生",
+        candidate_limit: 1
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        searchChatChain: async (_browser, options) => {
+          assert.equal(options.profile, "测试");
+          assert.equal(options.jobTitle, "招聘实习生");
+          return {
+            passed: true,
+            profile: "测试",
+            jobTitle: "招聘实习生",
+            requestedCandidateLimit: 1,
+            scannedCandidates: 1,
+            passedCandidates: 1,
+            llmCalls: 1,
+            communicationClicks: 1,
+            actionClicks: 1,
+            violations: [],
+            items: [
+              {
+                index: 0,
+                candidate: { name: "张三", resumeId: "resume-1" },
+                inputManifest: { schemaVersion: "cv" },
+                llmRequest: { mode: "recommend" },
+                decision: { decision: "pass", post_action: "chat" },
+                chatAction: { ok: true, clicked: true, status: "search_contacted" },
+                status: "search_contacted"
+              }
+            ]
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.result.workflow, RUN_WORKFLOWS.SEARCH_CHAT_CHAIN);
+    assert.equal(stored.result.summary.ok, true);
+    assert.equal(stored.artifact_summary.itemCount, 1);
+  });
+});
+
 test("runWorker persists recommend-chat chain progress emitted by executor", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
   await withRuntimeHome(workspaceRoot, async () => {

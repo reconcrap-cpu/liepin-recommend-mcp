@@ -34,6 +34,14 @@ import {
   runRecommendChatChain,
   summarizeRecommendChatChain
 } from "./liepin/recommend-chat-chain.js";
+import {
+  runSearchChatChain,
+  summarizeSearchChatChain
+} from "./liepin/search-chat-chain.js";
+import {
+  discoverSearchOptions,
+  summarizeSearchOptions
+} from "./liepin/search-options.js";
 import { collectChatConversationStates, sampleChatResumeDetailResumes } from "./liepin/chat-sampler.js";
 import { collectChatScreenInputs } from "./liepin/chat-screen-input.js";
 import { summarizeChatScreeningPolicy } from "./liepin/chat-state-policy.js";
@@ -209,10 +217,11 @@ export async function runCli(argv = process.argv.slice(2)) {
     return;
   }
 
-  if (["recommend", "chat", "recommend-chat"].includes(command) && subcommand === "start") {
+  if (["recommend", "chat", "recommend-chat", "search"].includes(command) && subcommand === "start") {
     const input = parseStartInputFlags(command, flags, defaultDebugPort);
     assertCliSideEffectApproval({
-      needsChatAction: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
+      needsChatAction: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
+        || input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
       needsRequestResume: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
         && Boolean(input.execute_request_resume),
       allowChatAction: Boolean(input.allow_chat_action),
@@ -278,6 +287,14 @@ async function runResearchCommand(subcommand, flags, workspaceRoot = getWorkspac
     });
     printJson({ ok: result.passed, summary: summarizeRecommendFilterDiscovery(result), result });
     if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "search-options") {
+    const discovery = await discoverSearchOptions({ port }, {
+      openJobDropdown: flags["open-job-dropdown"] !== "false"
+    });
+    printJson({ ok: discovery.passed, summary: summarizeSearchOptions(discovery), discovery });
+    if (!discovery.passed) process.exitCode = 1;
     return;
   }
   if (subcommand === "recommend-filter-execute") {
@@ -381,6 +398,29 @@ async function runResearchCommand(subcommand, flags, workspaceRoot = getWorkspac
       chatProvider: llm.chatProvider
     });
     printJson({ ok: result.passed, summary: summarizeRecommendChatChain(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "search-chat-chain") {
+    assertCliSideEffectApproval({
+      needsChatAction: true,
+      allowChatAction: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, false)
+    });
+    const llm = resolveSearchChatChainLlm(flags);
+    const result = await runSearchChatChain({ port }, {
+      candidateLimit: parsePositiveInteger(flags["candidate-limit"] || flags.candidateLimit, 5),
+      scanLimit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+      profile: normalizeText(flags.profile || flags["search-profile"] || flags.searchProfile) || null,
+      jobTitle: normalizeText(flags.job || flags["job-title"] || flags.jobTitle) || null,
+      startIndex: parseOptionalNonNegativeInteger(flags["start-index"] || flags.startIndex) || 0,
+      stepDelayMs: parsePositiveInteger(flags["step-delay-ms"] || flags.stepDelayMs, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      maxPayloadChars: parsePositiveInteger(flags.maxChars || flags["max-chars"], null),
+      criteria: normalizeText(flags.criteria || flags["recommend-criteria"] || flags.recommendCriteria) || null,
+      operatorFilter: normalizeFilterFlag(flags.filter),
+      config: llm.config,
+      provider: llm.provider
+    });
+    printJson({ ok: result.passed, summary: summarizeSearchChatChain(result), result });
     if (!result.passed) process.exitCode = 1;
     return;
   }
@@ -615,6 +655,39 @@ function resolveRecommendChatChainLlm(flags) {
   };
 }
 
+function resolveSearchChatChainLlm(flags) {
+  if (parseOptionalBoolean(flags["mock-llm"] ?? flags.mockLlm, false)) {
+    return {
+      config: {
+        model: normalizeText(flags["mock-model"] || flags.mockModel) || "mock-search-chat-chain"
+      },
+      provider: buildMockRecommendScreeningProvider({
+        decision: normalizeText(
+          flags["mock-recommend-decision"]
+          || flags.mockRecommendDecision
+          || flags["mock-decision"]
+          || flags.mockDecision
+        ) || "pass",
+        postAction: normalizeText(
+          flags["mock-recommend-post-action"]
+          || flags.mockRecommendPostAction
+          || flags["mock-post-action"]
+          || flags.mockPostAction
+        ) || "chat",
+        reasoningText: normalizeText(flags["mock-reasoning"] || flags.mockReasoning)
+      })
+    };
+  }
+  const resolution = readScreeningConfig(getWorkspaceRoot());
+  if (!resolution.ok) {
+    throw new Error(`${resolution.error.message} 如需无密钥验收搜索串联，请显式传入 --mock-llm。`);
+  }
+  return {
+    config: resolution.config,
+    provider: null
+  };
+}
+
 async function runRunCommand(subcommand, flags) {
   const workspaceRoot = getWorkspaceRoot();
   const runId = normalizeText(flags.runId || flags["run-id"]);
@@ -757,6 +830,28 @@ function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT
     };
   }
 
+  if (kind === RUN_KINDS.SEARCH) {
+    return {
+      ...base,
+      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
+      profile: normalizeText(flags.profile || flags["search-profile"] || flags.searchProfile) || null,
+      job: normalizeText(flags.job || flags["job-title"] || flags.jobTitle) || null,
+      candidate_limit: base.candidate_limit || 5,
+      scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+      start_index: parseOptionalNonNegativeInteger(flags["start-index"] || flags.startIndex) || 0,
+      step_delay_ms: parsePositiveInteger(flags["step-delay-ms"] || flags.stepDelayMs, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      filter: base.filter || null,
+      criteria: base.criteria || base.recommend_criteria || null,
+      execute_request_resume: false,
+      allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, true),
+      allow_request_resume: false,
+      mock_decision: base.mock_decision || "pass",
+      mock_post_action: base.mock_post_action || "chat",
+      mock_recommend_decision: normalizeText(flags["mock-recommend-decision"] || flags.mockRecommendDecision),
+      mock_recommend_post_action: normalizeText(flags["mock-recommend-post-action"] || flags.mockRecommendPostAction)
+    };
+  }
+
   return {
     ...base,
     workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
@@ -812,7 +907,7 @@ function assertCliSideEffectApproval({
   allowRequestResume = false
 } = {}) {
   if (needsChatAction && !allowChatAction) {
-    throw new Error("该命令会真实点击推荐沟通；请显式传入 --allow-chat-action。");
+    throw new Error("该命令会真实点击沟通；请显式传入 --allow-chat-action。");
   }
   if (needsRequestResume && !allowRequestResume) {
     throw new Error("该命令会真实索要简历；请显式传入 --allow-request-resume。");
@@ -848,6 +943,7 @@ function buildHelp() {
     "  external-agent-config [--output <path>]",
     "  provider check [--mode both|recommend|chat]",
     "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
+    "  search start [--debug-port 9222] --profile <搜索profile> --job <岗位> [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false]",
     "  chat start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
     "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
     "  runs list [--full]",
@@ -862,12 +958,14 @@ function buildHelp() {
     "  research acquisition-probe --debug-port 9222",
     "  research recommend-sample --limit 5",
     "  research recommend-filter-discovery --debug-port 9222",
+    "  research search-options --debug-port 9222",
     "  research recommend-filter-execute --preset p17 [--restore false]",
     "  research recommend-scroll-audit [--max-passes 80] [--idle-passes 3] [--scroll-pages 4] [--bottom-settle-delay-ms 4000]",
     "  research recommend-traversal-audit [--steps 10] [--tab 推荐] [--step-delay-ms 3500]",
     "  research recommend-dry-run-screening [--candidate-limit 20] [--tab 推荐] [--mock-llm]",
     "  research recommend-action --action none|chat [--start-index 0] [--tab 推荐] [--allow-chat-action]",
     "  research recommend-chat-chain [--candidate-limit 5] [--scan-limit 10] [--chat-entry-timeout-ms 30000] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
+    "  research search-chat-chain --profile <搜索profile> --job <岗位> [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false]",
     "  research chat-scroll-audit [--filter 有简历] [--max-passes 80] [--idle-passes 3]",
     "  research chat-states --limit 20 [--filter 有简历]",
     "  research chat-sample --limit 5 [--filter 有简历]",

@@ -34,7 +34,8 @@ export const RUN_STATES = {
 export const RUN_KINDS = {
   RECOMMEND: "recommend",
   CHAT: "chat",
-  RECOMMEND_CHAT: "recommend-chat"
+  RECOMMEND_CHAT: "recommend-chat",
+  SEARCH: "search"
 };
 
 export const RUN_WORKFLOWS = {
@@ -43,7 +44,8 @@ export const RUN_WORKFLOWS = {
   CV_SURVEY: "cv_survey",
   RECOMMEND_DRY_RUN_SCREENING: "recommend_dry_run_screening",
   CHAT_DRY_RUN_SCREENING: "chat_dry_run_screening",
-  RECOMMEND_CHAT_CHAIN: "recommend_chat_chain"
+  RECOMMEND_CHAT_CHAIN: "recommend_chat_chain",
+  SEARCH_CHAT_CHAIN: "search_chat_chain"
 };
 
 export const TERMINAL_RUN_STATES = new Set([
@@ -54,6 +56,7 @@ export const TERMINAL_RUN_STATES = new Set([
 
 export const LIEPIN_URLS = {
   recommend: "https://lpt.liepin.com/recommend",
+  search: "https://lpt.liepin.com/search",
   chat: "https://lpt.liepin.com/chat/im",
   resumeDetailFragment: "/resume/detail",
   safeHost: "safe.liepin.com",
@@ -68,7 +71,9 @@ export const TOOL_NAMES = {
   externalAgentConfig: "liepin_external_agent_config",
   providerCheck: "liepin_provider_check",
   recommendFilterOptions: "liepin_recommend_filter_options",
+  searchOptions: "liepin_search_options",
   recommendStart: "liepin_recommend_start",
+  searchStart: "liepin_search_start",
   chatStart: "liepin_chat_start",
   recommendChatStart: "liepin_recommend_chat_start",
   runStatus: "liepin_run_status",

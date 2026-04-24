@@ -1,6 +1,6 @@
 {
   "name": "@reconcrap/liepin-recommend-mcp",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Liepin recommend/chat MCP pipeline with phased development guardrails",
   "type": "module",
   "main": "src/index.js",
@@ -21,7 +21,7 @@
     "doctor": "node src/cli.js doctor --json",
     "install:local": "node src/cli.js install",
     "postinstall": "node scripts/postinstall.cjs",
-    "test": "node --test src/config.test.js src/run-state.test.js src/json-rpc.test.js src/worker.test.js src/doctor.test.js src/platform.test.js src/provider-check.test.js src/chrome.test.js src/liepin/page-health.test.js src/liepin/cv-survey.test.js src/liepin/cv-parser.test.js src/liepin/cv-payload.test.js src/liepin/chat-screen-input.test.js src/liepin/chat-state-policy.test.js src/liepin/chat-action.test.js src/liepin/chat-dry-run-screening.test.js src/liepin/recommend-filter-discovery.test.js src/liepin/recommend-filter-executor.test.js src/liepin/recommend-traversal.test.js src/liepin/recommend-dry-run-screening.test.js src/liepin/recommend-action.test.js src/liepin/recommend-chat-chain.test.js src/liepin/infinite-scroll.test.js src/llm-adapter.test.js"
+    "test": "node --test src/config.test.js src/run-state.test.js src/json-rpc.test.js src/worker.test.js src/doctor.test.js src/platform.test.js src/provider-check.test.js src/chrome.test.js src/liepin/page-health.test.js src/liepin/cv-survey.test.js src/liepin/cv-parser.test.js src/liepin/cv-payload.test.js src/liepin/chat-screen-input.test.js src/liepin/chat-state-policy.test.js src/liepin/chat-action.test.js src/liepin/chat-dry-run-screening.test.js src/liepin/recommend-filter-discovery.test.js src/liepin/recommend-filter-executor.test.js src/liepin/recommend-traversal.test.js src/liepin/recommend-dry-run-screening.test.js src/liepin/recommend-action.test.js src/liepin/recommend-chat-chain.test.js src/liepin/search-options.test.js src/liepin/search-action.test.js src/liepin/search-chat-chain.test.js src/liepin/infinite-scroll.test.js src/llm-adapter.test.js"
   },
   "files": [
     "bin",

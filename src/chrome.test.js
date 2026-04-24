@@ -16,6 +16,7 @@ test("classifyLiepinPage detects Liepin risk captcha before normal pages", () =>
 
 test("classifyLiepinPage classifies normal Liepin targets", () => {
   assert.equal(classifyLiepinPage("https://lpt.liepin.com/recommend#preview"), "recommend");
+  assert.equal(classifyLiepinPage("https://lpt.liepin.com/search#preview"), "search");
   assert.equal(classifyLiepinPage("https://lpt.liepin.com/chat/im#preview"), "chat");
   assert.equal(classifyLiepinPage("https://lpt.liepin.com/resume/detail?resIdEncode=abc"), "resume_detail");
 });
