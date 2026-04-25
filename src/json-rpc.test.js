@@ -356,6 +356,84 @@ test("search start defaults to search chat chain over JSON-RPC", async () => {
   assert.equal(payload.workflow, RUN_WORKFLOWS.SEARCH_CHAT_CHAIN);
 });
 
+test("search start validates and canonicalizes page option names before accepting", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
+  const previous = process.env[ENV_HOME];
+  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  try {
+    const response = await handleJsonRpc({
+      jsonrpc: "2.0",
+      id: 17,
+      method: "tools/call",
+      params: {
+        name: TOOL_NAMES.searchStart,
+        arguments: {
+          profile: "杭州 算法",
+          job: "科研算法工程师(大模型与 aigc 方向)",
+          criteria: "筛选条件",
+          candidate_limit: 1
+        }
+      }
+    }, workspaceRoot, {
+      spawnWorker: stubWorker,
+      runDoctorFn: okDoctor,
+      discoverSearchOptionsFn: async () => ({
+        passed: true,
+        profiles: [{ title: "杭州算法" }],
+        jobs: [{ title: "科研算法工程师（大模型与AIGC方向）\u200b " }],
+        checkedJobConditions: []
+      })
+    });
+    const payload = JSON.parse(response.result.content[0].text);
+    assert.equal(response.result.isError, false);
+    assert.equal(payload.status, "ACCEPTED");
+    assert.equal(payload.preflight.searchOptions.profile.canonical, "杭州算法");
+    assert.equal(payload.preflight.searchOptions.job.canonical, "科研算法工程师（大模型与AIGC方向）");
+
+    const snapshot = readRunState(workspaceRoot, payload.run_id);
+    assert.equal(snapshot.input.profile, "杭州算法");
+    assert.equal(snapshot.input.job, "科研算法工程师（大模型与AIGC方向）");
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ENV_HOME];
+    } else {
+      process.env[ENV_HOME] = previous;
+    }
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("search start rejects unmatched page option names before queueing", async () => {
+  const response = await handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 18,
+    method: "tools/call",
+    params: {
+      name: TOOL_NAMES.searchStart,
+      arguments: {
+        profile: "杭州算法",
+        job: "不存在的职位",
+        criteria: "筛选条件",
+        candidate_limit: 1
+      }
+    }
+  }, process.cwd(), {
+    spawnWorker: stubWorker,
+    runDoctorFn: okDoctor,
+    discoverSearchOptionsFn: async () => ({
+      passed: true,
+      profiles: [{ title: "杭州算法" }],
+      jobs: [{ title: "科研算法工程师（大模型与AIGC方向）" }],
+      checkedJobConditions: []
+    })
+  });
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, true);
+  assert.equal(payload.status, "FAILED");
+  assert.equal(payload.error.code, "SEARCH_START_OPTION_MISMATCH");
+  assert.equal(payload.error.message.includes("不存在的职位"), true);
+});
+
 test("search start rejects when chat action is not allowed", async () => {
   const response = await handleJsonRpc({
     jsonrpc: "2.0",

@@ -27,6 +27,7 @@ import {
 import { describeRecommendFilterOptions } from "./liepin/recommend-filter-executor.js";
 import {
   discoverSearchOptions,
+  findSearchOptionMatch,
   summarizeSearchOptions
 } from "./liepin/search-options.js";
 import {
@@ -395,7 +396,8 @@ function createStartTool(name, kind) {
 
 export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(), {
   spawnWorker = spawnRunWorker,
-  runDoctorFn = runDoctor
+  runDoctorFn = runDoctor,
+  discoverSearchOptionsFn = discoverSearchOptions
 } = {}) {
   const defaultDebugPort = resolveDefaultDebugPort(workspaceRoot);
   if (!message || message.jsonrpc !== "2.0") {
@@ -687,7 +689,8 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         workspaceRoot,
         kind: effectiveKind,
         input,
-        runDoctorFn
+        runDoctorFn,
+        discoverSearchOptionsFn
       });
       if (!preflight.ok) {
         return createToolResult(id, createDoctorFailurePayload(preflight.doctor, preflight.targetPage), true);
@@ -713,7 +716,8 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         preflight: {
           ok: true,
           targetPage: preflight.targetPage,
-          fixes: preflight.doctor?.fixes || []
+          fixes: preflight.doctor?.fixes || [],
+          searchOptions: preflight.searchOptions || null
         }
       });
     }
@@ -734,7 +738,8 @@ async function runStartPreflight({
   workspaceRoot,
   kind,
   input,
-  runDoctorFn
+  runDoctorFn,
+  discoverSearchOptionsFn
 } = {}) {
   const targetPage = targetPageForStart(kind, input);
   const doctor = await runDoctorFn({
@@ -745,10 +750,67 @@ async function runStartPreflight({
     targetPage,
     requireScreeningConfig: !input.mock_llm
   });
+  if (doctor?.ok && shouldValidateSearchStartOptions(kind, input)) {
+    const searchOptions = await validateAndCanonicalizeSearchStartInput(input, {
+      discoverSearchOptionsFn
+    });
+    return {
+      ok: true,
+      targetPage,
+      doctor,
+      searchOptions
+    };
+  }
+
   return {
     ok: Boolean(doctor?.ok),
     targetPage,
     doctor
+  };
+}
+
+function shouldValidateSearchStartOptions(kind, input = {}) {
+  return Boolean(
+    (kind === RUN_KINDS.SEARCH || input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN)
+    && input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN
+    && !input.mock_llm
+  );
+}
+
+async function validateAndCanonicalizeSearchStartInput(input = {}, {
+  discoverSearchOptionsFn
+} = {}) {
+  const discovery = await discoverSearchOptionsFn({
+    port: input.debug_port
+  }, {
+    openJobDropdown: true
+  });
+  const profileMatch = findSearchOptionMatch(discovery.profiles, input.profile);
+  const jobMatch = findSearchOptionMatch(discovery.jobs, input.job);
+  if (!profileMatch || !jobMatch) {
+    const missing = [];
+    if (!profileMatch) missing.push(`profile=${normalizeText(input.profile) || "(empty)"}`);
+    if (!jobMatch) missing.push(`job=${normalizeText(input.job) || "(empty)"}`);
+    const error = new Error(
+      `搜索任务启动参数与页面选项不匹配：${missing.join("，")}。可选 profile：${(discovery.profiles || []).map((profile) => profile.title).filter(Boolean).join("、") || "(empty)"}；可选 job：${(discovery.jobs || []).map((job) => job.title).filter(Boolean).join("、") || "(empty)"}。`
+    );
+    error.code = "SEARCH_START_OPTION_MISMATCH";
+    throw error;
+  }
+  input.profile = profileMatch.title;
+  input.job = jobMatch.title;
+  return {
+    profile: {
+      requested: profileMatch.requested,
+      canonical: profileMatch.title,
+      matchType: profileMatch.matchType
+    },
+    job: {
+      requested: jobMatch.requested,
+      canonical: jobMatch.title,
+      matchType: jobMatch.matchType
+    },
+    summary: summarizeSearchOptions(discovery)
   };
 }
 

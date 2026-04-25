@@ -61,6 +61,76 @@ export function summarizeSearchOptions(discovery = {}) {
   };
 }
 
+export function normalizeSearchOptionTextForMatch(value) {
+  const text = normalizeText(value);
+  const normalized = typeof text.normalize === "function" ? text.normalize("NFKC") : text;
+  return normalized
+    .replace(/[\u200B-\u200D\uFEFF]/gu, "")
+    .replace(/[（]/gu, "(")
+    .replace(/[）]/gu, ")")
+    .replace(/\s+/gu, "")
+    .toLowerCase();
+}
+
+export function findSearchOptionMatch(options = [], requestedTitle = "", {
+  titleKey = "title"
+} = {}) {
+  const requested = normalizeText(requestedTitle);
+  const requestedLoose = normalizeSearchOptionTextForMatch(requested);
+  if (!requested || !requestedLoose) return null;
+
+  const candidates = (Array.isArray(options) ? options : [])
+    .map((option, index) => ({
+      option,
+      index,
+      title: normalizeSearchOptionDisplayTitle(option?.[titleKey] ?? option),
+      looseTitle: normalizeSearchOptionTextForMatch(option?.[titleKey] ?? option)
+    }))
+    .filter((candidate) => candidate.title && candidate.looseTitle)
+    .map((candidate) => {
+      const score = scoreSearchOptionMatch(candidate.title, candidate.looseTitle, requested, requestedLoose);
+      return {
+        ...candidate,
+        score: score.value,
+        matchType: score.matchType
+      };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      const leftDistance = Math.abs(left.looseTitle.length - requestedLoose.length);
+      const rightDistance = Math.abs(right.looseTitle.length - requestedLoose.length);
+      if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+      return left.index - right.index;
+    });
+
+  const best = candidates[0];
+  if (!best) return null;
+  return {
+    ...best.option,
+    title: best.title,
+    requested,
+    matchType: best.matchType,
+    index: best.option?.index ?? best.index
+  };
+}
+
+function normalizeSearchOptionDisplayTitle(value) {
+  return normalizeText(value).replace(/[\u200B-\u200D\uFEFF]/gu, "").trim();
+}
+
+function scoreSearchOptionMatch(title, looseTitle, requested, requestedLoose) {
+  if (title === requested) return { value: 100, matchType: "exact" };
+  if (looseTitle === requestedLoose) return { value: 95, matchType: "loose_exact" };
+  if (looseTitle.startsWith(requestedLoose) || requestedLoose.startsWith(looseTitle)) {
+    return { value: 80, matchType: "loose_prefix" };
+  }
+  if (looseTitle.includes(requestedLoose) || requestedLoose.includes(looseTitle)) {
+    return { value: 70, matchType: "loose_includes" };
+  }
+  return { value: 0, matchType: "none" };
+}
+
 export async function readSearchPageState(client) {
   return client.evaluate((selectors) => {
     const getText = (node) => (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();

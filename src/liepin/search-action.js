@@ -54,7 +54,7 @@ export async function prepareSearchJobSelection(client, {
 
 export async function selectSearchTopJob(client, jobTitle) {
   return client.evaluate((selectors, requestedJobTitle) => {
-    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const normalize = (value) => String(value || "").replace(/[\u200B-\u200D\uFEFF]/gu, "").replace(/\s+/g, " ").trim();
     const getText = (node) => normalize(node?.innerText || node?.textContent || "");
     const dropdown = document.querySelector(selectors.selectedJobDropdownOpen)
       || document.querySelector(selectors.selectedJobDropdown);
@@ -87,11 +87,82 @@ export async function selectSearchTopJob(client, jobTitle) {
     };
 
     function findBestTextMatch(items, text) {
-      const exact = items.find((item) => normalize(item.title) === text);
-      if (exact) return { ...exact, matchType: "exact" };
-      const includes = items.find((item) => normalize(item.title).includes(text) || text.includes(normalize(item.title)));
-      if (includes) return { ...includes, matchType: "includes" };
-      return null;
+      return matchByLooseText(items, text);
+    }
+
+    function normalizeLoose(value) {
+      const normalized = normalize(value);
+      const nfkc = typeof normalized.normalize === "function" ? normalized.normalize("NFKC") : normalized;
+      return nfkc
+        .replace(/[\u200B-\u200D\uFEFF]/gu, "")
+        .replace(/[（]/gu, "(")
+        .replace(/[）]/gu, ")")
+        .replace(/\s+/gu, "")
+        .toLowerCase();
+    }
+
+    function matchByLooseText(items, text) {
+      const requestedLoose = normalizeLoose(text);
+      return items
+        .map((item) => {
+          const title = normalize(item.title);
+          const looseTitle = normalizeLoose(title);
+          let score = 0;
+          let matchType = "none";
+          if (title === text) {
+            score = 100;
+            matchType = "exact";
+          } else if (looseTitle === requestedLoose) {
+            score = 95;
+            matchType = "loose_exact";
+          } else if (looseTitle.startsWith(requestedLoose) || requestedLoose.startsWith(looseTitle)) {
+            score = 80;
+            matchType = "loose_prefix";
+          } else if (looseTitle.includes(requestedLoose) || requestedLoose.includes(looseTitle)) {
+            score = 70;
+            matchType = "loose_includes";
+          } else {
+            const tokenScore = tokenCoverageScore(title, text);
+            if (tokenScore >= 0.7) {
+              score = 60 + Math.round(tokenScore * 10);
+              matchType = "token_coverage";
+            }
+          }
+          return {
+            ...item,
+            title,
+            score,
+            matchType,
+            distance: Math.abs(looseTitle.length - requestedLoose.length)
+          };
+        })
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score || left.distance - right.distance || left.index - right.index)[0] || null;
+    }
+
+    function tokenCoverageScore(candidateText, requestedText) {
+      const candidateLoose = normalizeLoose(candidateText);
+      const tokens = extractLooseTokens(requestedText);
+      if (!tokens.length) return 0;
+      const hits = tokens.filter((token) => candidateLoose.includes(token) || candidateLoose.includes(simplifyToken(token)));
+      return hits.length / tokens.length;
+    }
+
+    function extractLooseTokens(value) {
+      return normalize(value)
+        .normalize("NFKC")
+        .replace(/[（]/gu, "(")
+        .replace(/[）]/gu, ")")
+        .split(/[·,，;；|、\s]+/u)
+        .map((token) => normalizeLoose(token))
+        .map(simplifyToken)
+        .filter((token) => token.length >= 2);
+    }
+
+    function simplifyToken(token) {
+      return String(token || "")
+        .replace(/及以上$/u, "")
+        .replace(/及以下$/u, "");
     }
   }, searchSelectors, jobTitle);
 }
@@ -145,7 +216,7 @@ export async function applySearchQuickProfile(client, {
   if (!requestedProfile) throw new Error("搜索 profile 不能为空");
   const before = await readSearchListState(client);
   const click = await client.evaluate((selectors, requested) => {
-    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const normalize = (value) => String(value || "").replace(/[\u200B-\u200D\uFEFF]/gu, "").replace(/\s+/g, " ").trim();
     const getText = (node) => normalize(node?.innerText || node?.textContent || "");
     const visible = (node) => {
       if (!node) return false;
@@ -169,9 +240,7 @@ export async function applySearchQuickProfile(client, {
         };
       })
       .filter((item) => item.title);
-    const exact = profiles.find((item) => item.title === requested);
-    const partial = profiles.find((item) => item.title.includes(requested) || requested.includes(item.title));
-    const target = exact || partial;
+    const target = matchByLooseText(profiles, requested);
     if (!target) {
       return {
         clicked: false,
@@ -187,9 +256,84 @@ export async function applySearchQuickProfile(client, {
       clicked: true,
       requested,
       selectedProfile: target.title,
-      matchType: exact ? "exact" : "includes",
+      matchType: target.matchType,
       availableProfiles: profiles.map((item) => item.title)
     };
+
+    function normalizeLoose(value) {
+      const normalized = normalize(value);
+      const nfkc = typeof normalized.normalize === "function" ? normalized.normalize("NFKC") : normalized;
+      return nfkc
+        .replace(/[\u200B-\u200D\uFEFF]/gu, "")
+        .replace(/[（]/gu, "(")
+        .replace(/[）]/gu, ")")
+        .replace(/\s+/gu, "")
+        .toLowerCase();
+    }
+
+    function matchByLooseText(items, text) {
+      const requestedLoose = normalizeLoose(text);
+      return items
+        .map((item) => {
+          const title = normalize(item.title);
+          const looseTitle = normalizeLoose(title);
+          let score = 0;
+          let matchType = "none";
+          if (title === text) {
+            score = 100;
+            matchType = "exact";
+          } else if (looseTitle === requestedLoose) {
+            score = 95;
+            matchType = "loose_exact";
+          } else if (looseTitle.startsWith(requestedLoose) || requestedLoose.startsWith(looseTitle)) {
+            score = 80;
+            matchType = "loose_prefix";
+          } else if (looseTitle.includes(requestedLoose) || requestedLoose.includes(looseTitle)) {
+            score = 70;
+            matchType = "loose_includes";
+          } else {
+            const tokenScore = tokenCoverageScore(title, text);
+            if (tokenScore >= 0.7) {
+              score = 60 + Math.round(tokenScore * 10);
+              matchType = "token_coverage";
+            }
+          }
+          return {
+            ...item,
+            title,
+            score,
+            matchType,
+            distance: Math.abs(looseTitle.length - requestedLoose.length)
+          };
+        })
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score || left.distance - right.distance || left.index - right.index)[0] || null;
+    }
+
+    function tokenCoverageScore(candidateText, requestedText) {
+      const candidateLoose = normalizeLoose(candidateText);
+      const tokens = extractLooseTokens(requestedText);
+      if (!tokens.length) return 0;
+      const hits = tokens.filter((token) => candidateLoose.includes(token) || candidateLoose.includes(simplifyToken(token)));
+      return hits.length / tokens.length;
+    }
+
+    function extractLooseTokens(value) {
+      return normalize(value)
+        .normalize("NFKC")
+        .replace(/[（]/gu, "(")
+        .replace(/[）]/gu, ")")
+        .split(/[·,，;；|、\s]+/u)
+        .map((token) => normalizeLoose(token))
+        .map(simplifyToken)
+        .filter((token) => token.length >= 2);
+    }
+
+    function simplifyToken(token) {
+      return String(token || "")
+        .replace(/及以上$/u, "")
+        .replace(/及以下$/u, "");
+    }
   }, searchSelectors, requestedProfile);
   if (!click.clicked) {
     throw new Error(`搜索 profile 未找到：${requestedProfile}；可选 profile：${click.availableProfiles?.join("、") || "(empty)"}`);
@@ -472,6 +616,19 @@ export async function executeSearchChatAction(client, {
   const serviceVisible = await waitForSearchServiceJobModal(client);
   if (!serviceVisible) {
     const after = await readSearchChatButtonState(client);
+    if (isAlreadyContactedButtonText(after.text)) {
+      return {
+        ok: true,
+        status: "search_contacted",
+        clicked: true,
+        before,
+        click,
+        selectedJob: null,
+        confirm: null,
+        modalClosed: true,
+        after
+      };
+    }
     return {
       ok: false,
       status: "service_job_modal_not_found",
@@ -481,15 +638,30 @@ export async function executeSearchChatAction(client, {
       after
     };
   }
-  const selectedJob = await selectSearchServiceJob(client, requestedJobTitle);
+  const selectedJob = await waitForSearchServiceJobSelection(client, requestedJobTitle);
   if (!selectedJob.clicked) {
+    const after = await readSearchChatButtonState(client);
+    if (isAlreadyContactedButtonText(after.text)) {
+      return {
+        ok: true,
+        status: "search_contacted",
+        clicked: true,
+        before,
+        click,
+        selectedJob,
+        confirm: null,
+        modalClosed: true,
+        after
+      };
+    }
     return {
       ok: false,
       status: "service_job_not_found",
       clicked: true,
       before,
       click,
-      selectedJob
+      selectedJob,
+      after
     };
   }
   await waitForSearchServiceJobConfirmEnabled(client, { timeoutMs: 4000 });
@@ -551,9 +723,34 @@ export async function waitForSearchServiceJobModal(client) {
   });
 }
 
+export async function waitForSearchServiceJobSelection(client, jobTitle, {
+  timeoutMs = 8000,
+  pollMs = 250
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  let attempts = 0;
+  while (Date.now() < deadline) {
+    attempts += 1;
+    latest = await selectSearchServiceJob(client, jobTitle);
+    if (latest.clicked) {
+      return {
+        ...latest,
+        attempts
+      };
+    }
+    await sleep(pollMs);
+  }
+  latest = latest || await selectSearchServiceJob(client, jobTitle);
+  return {
+    ...latest,
+    attempts
+  };
+}
+
 export async function selectSearchServiceJob(client, jobTitle) {
   return client.evaluate((selectors, requestedJobTitle) => {
-    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const normalize = (value) => String(value || "").replace(/[\u200B-\u200D\uFEFF]/gu, "").replace(/\s+/g, " ").trim();
     const getText = (node) => normalize(node?.innerText || node?.textContent || "");
     const visible = (node) => {
       if (!node) return false;
@@ -597,11 +794,82 @@ export async function selectSearchServiceJob(client, jobTitle) {
     };
 
     function matchJobRow(rowsToMatch, text) {
-      const exact = rowsToMatch.find((row) => normalize(row.title) === text);
-      if (exact) return { ...exact, matchType: "exact" };
-      const includes = rowsToMatch.find((row) => normalize(row.title).includes(text) || text.includes(normalize(row.title)));
-      if (includes) return { ...includes, matchType: "includes" };
-      return null;
+      return matchByLooseText(rowsToMatch, text);
+    }
+
+    function normalizeLoose(value) {
+      const normalized = normalize(value);
+      const nfkc = typeof normalized.normalize === "function" ? normalized.normalize("NFKC") : normalized;
+      return nfkc
+        .replace(/[\u200B-\u200D\uFEFF]/gu, "")
+        .replace(/[（]/gu, "(")
+        .replace(/[）]/gu, ")")
+        .replace(/\s+/gu, "")
+        .toLowerCase();
+    }
+
+    function matchByLooseText(items, text) {
+      const requestedLoose = normalizeLoose(text);
+      return items
+        .map((item) => {
+          const title = normalize(item.title);
+          const looseTitle = normalizeLoose(title);
+          let score = 0;
+          let matchType = "none";
+          if (title === text) {
+            score = 100;
+            matchType = "exact";
+          } else if (looseTitle === requestedLoose) {
+            score = 95;
+            matchType = "loose_exact";
+          } else if (looseTitle.startsWith(requestedLoose) || requestedLoose.startsWith(looseTitle)) {
+            score = 80;
+            matchType = "loose_prefix";
+          } else if (looseTitle.includes(requestedLoose) || requestedLoose.includes(looseTitle)) {
+            score = 70;
+            matchType = "loose_includes";
+          } else {
+            const tokenScore = tokenCoverageScore(title, text);
+            if (tokenScore >= 0.7) {
+              score = 60 + Math.round(tokenScore * 10);
+              matchType = "token_coverage";
+            }
+          }
+          return {
+            ...item,
+            title,
+            score,
+            matchType,
+            distance: Math.abs(looseTitle.length - requestedLoose.length)
+          };
+        })
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score || left.distance - right.distance || left.index - right.index)[0] || null;
+    }
+
+    function tokenCoverageScore(candidateText, requestedText) {
+      const candidateLoose = normalizeLoose(candidateText);
+      const tokens = extractLooseTokens(requestedText);
+      if (!tokens.length) return 0;
+      const hits = tokens.filter((token) => candidateLoose.includes(token) || candidateLoose.includes(simplifyToken(token)));
+      return hits.length / tokens.length;
+    }
+
+    function extractLooseTokens(value) {
+      return normalize(value)
+        .normalize("NFKC")
+        .replace(/[（]/gu, "(")
+        .replace(/[）]/gu, ")")
+        .split(/[·,，;；|、\s]+/u)
+        .map((token) => normalizeLoose(token))
+        .map(simplifyToken)
+        .filter((token) => token.length >= 2);
+    }
+
+    function simplifyToken(token) {
+      return String(token || "")
+        .replace(/及以上$/u, "")
+        .replace(/及以下$/u, "");
     }
 
     function dedupeNodes(nodes) {
@@ -722,11 +990,46 @@ export async function closeSearchModalToList(client) {
     timeoutMs: 7000,
     pollMs: 250
   });
+  if (!closed) {
+    await pressSearchEscapeKey(client);
+    const closedByEscape = await client.waitFor((selector) => {
+      const node = document.querySelector(selector);
+      if (!node) return true;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0;
+    }, [searchSelectors.modalRoot], {
+      timeoutMs: 3000,
+      pollMs: 250
+    });
+    return {
+      closed: Boolean(closedByEscape),
+      closeMethod: click.clicked ? "close_button+escape" : "escape",
+      click
+    };
+  }
   return {
     closed: Boolean(closed),
     closeMethod: click.clicked ? "close_button" : "none",
     click
   };
+}
+
+async function pressSearchEscapeKey(client) {
+  const event = {
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27,
+    code: "Escape",
+    key: "Escape"
+  };
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    ...event
+  });
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    ...event
+  });
 }
 
 async function closeSearchServiceJobModalIfOpen(client) {
