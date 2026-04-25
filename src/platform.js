@@ -27,7 +27,9 @@ const supportedExternalAgents = ["cursor", "trae", "trae-cn", "claude", "opencla
 const externalMcpTargetsEnv = "LIEPIN_MCP_CONFIG_TARGETS";
 const externalSkillDirsEnv = "LIEPIN_EXTERNAL_SKILL_DIRS";
 const liepinPackageName = "@reconcrap/liepin-mcp";
+const legacyLiepinPackageName = "@reconcrap/liepin-recommend-mcp";
 const liepinBinaryName = "liepin-mcp";
+const legacyServerNames = ["liepin-recommend-mcp"];
 
 function getPackageVersion() {
   try {
@@ -278,21 +280,50 @@ function mergeMcpServerConfigFile(filePath, options = {}) {
       ? current.mcpServers
       : {};
   const existingEntry = existingServers[serverName];
+  const { servers: prunedServers, removedLegacyServers } = pruneLegacyLiepinServers(existingServers, serverName);
   const merged = {
     ...current,
     mcpServers: {
-      ...existingServers,
+      ...prunedServers,
       [serverName]: launchConfig
     }
   };
   ensureDirSync(path.dirname(filePath));
   fs.writeFileSync(filePath, JSON.stringify(merged, null, 2), "utf8");
-  const updated = JSON.stringify(existingEntry || null) !== JSON.stringify(launchConfig);
+  const updated = JSON.stringify(existingEntry || null) !== JSON.stringify(launchConfig)
+    || removedLegacyServers.length > 0;
   return {
     file: filePath,
     server: serverName,
-    updated
+    updated,
+    removedLegacyServers
   };
+}
+
+function pruneLegacyLiepinServers(servers = {}, currentServerName = SERVER_NAME) {
+  const pruned = { ...servers };
+  const removedLegacyServers = [];
+  for (const legacyName of legacyServerNames) {
+    if (legacyName === currentServerName) continue;
+    const entry = pruned[legacyName];
+    if (!isLegacyLiepinServerEntry(entry)) continue;
+    delete pruned[legacyName];
+    removedLegacyServers.push(legacyName);
+  }
+  return {
+    servers: pruned,
+    removedLegacyServers
+  };
+}
+
+function isLegacyLiepinServerEntry(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const haystack = JSON.stringify({
+    command: entry.command || "",
+    args: Array.isArray(entry.args) ? entry.args : [],
+    env: entry.env || {}
+  });
+  return haystack.includes(legacyLiepinPackageName);
 }
 
 function installExternalMcpConfigs(options = {}) {
@@ -307,7 +338,8 @@ function installExternalMcpConfigs(options = {}) {
         file: target,
         server: merged.server,
         created: !existed,
-        updated: merged.updated
+        updated: merged.updated,
+        removedLegacyServers: merged.removedLegacyServers || []
       });
     } catch (error) {
       skipped.push({
@@ -634,6 +666,18 @@ export function buildSkillExportPayload({
       scanLimitDefault: "unset; scan until target candidates or last page",
       doctorTargetPage: "search"
     },
+    chat: {
+      mustCallOptionsBeforeStart: true,
+      optionsTool: TOOL_NAMES.chatOptions,
+      startTool: TOOL_NAMES.chatStart,
+      onlyValidStartToolAfterConfirmation: TOOL_NAMES.chatStart,
+      forbiddenStartTools: [TOOL_NAMES.recommendStart, TOOL_NAMES.recommendChatStart],
+      requiredStartArgs: ["candidate_limit", "job", "unread_only", "criteria"],
+      onlyPageFilterArg: "unread_only",
+      doNotAskRecommendFilters: true,
+      criteriaMeansAiScreeningStandard: true,
+      doctorTargetPage: "chat"
+    },
     doctor: {
       autoFixBeforeStart: true,
       targetPages: {
@@ -671,12 +715,13 @@ function buildSkillExportMarkdown(payload = {}) {
     "",
     "## Safety Gates",
     "",
-    "- `recommend/chat/recommend-chat start` 默认走正式 recommend_chat_chain。",
-    "- 默认执行真实推荐沟通点击（`allow_chat_action=true`）。",
-    "- 默认执行真实索要简历点击（`execute_request_resume=true`, `allow_request_resume=true`）。",
+    "- `recommend/recommend-chat start` 默认走正式 recommend_chat_chain；`chat start` 默认走聊天页筛选。",
+    "- 推荐串联默认执行真实推荐沟通点击（`allow_chat_action=true`）。",
+    "- 推荐串联和聊天页筛选默认执行真实索要简历点击（`execute_request_resume=true`, `allow_request_resume=true`）。",
     "- 如需无副作用验收，请显式使用 dry-run workflow。",
     "- 启动推荐任务前先调用 `liepin_recommend_filter_options`，向用户展示可用筛选条件和选项。",
     "- `filter` 是猎聘页面筛选条件，不是 AI 筛选标准；示例：`学历=本科、硕士; 年龄=22-30; 院校=985、211`。",
+    "- 启动聊天页任务前先调用 `liepin_chat_options`，只询问岗位、是否只扫未读（`unread_only`）、AI 筛选标准和目标人数；参数确认后只能调用 `liepin_chat_start`，严禁调用 `liepin_recommend_start` 或 `liepin_recommend_chat_start`。",
     "- 启动搜索任务前先调用 `liepin_search_options`，向用户展示快捷搜索 profile 和职位选项。",
     "- 搜索任务必须确认 `profile`、`job`、`criteria`、`candidate_limit` 后再调用 `liepin_search_start`。",
     "- 搜索任务不传 `scan_limit` 时不限制扫描上限，只受目标通过人数或最后一页限制。",

@@ -28,6 +28,10 @@ import {
   summarizeChatDryRunScreening
 } from "./liepin/chat-dry-run-screening.js";
 import {
+  runChatScreening,
+  summarizeChatScreening
+} from "./liepin/chat-screening.js";
+import {
   buildMockRecommendScreeningProvider,
   runRecommendDryRunScreening,
   summarizeRecommendDryRunScreening
@@ -246,6 +250,26 @@ export async function executeWorkflow({
     };
   }
 
+  if (workflow === RUN_WORKFLOWS.CHAT_SCREENING) {
+    const llm = resolveChatScreeningLlm(workspaceRoot, input);
+    const result = await executors.chatScreening({ port }, {
+      candidateLimit: parsePositiveInteger(input.candidate_limit, null),
+      scanLimit: parsePositiveInteger(input.scan_limit, null),
+      jobTitle: normalizeText(input.job || input.job_title) || null,
+      unreadOnly: parseBooleanInput(input.unread_only, null),
+      maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      criteria: normalizeText(input.criteria) || null,
+      config: llm.config,
+      provider: llm.provider,
+      onProgress
+    });
+    return {
+      workflow,
+      summary: summarizeChatScreening(result),
+      result
+    };
+  }
+
   if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN) {
     const llm = resolveRecommendChatChainLlm(workspaceRoot, input);
     const filterPlan = buildRecommendFilterPlanFromText(input.filter);
@@ -347,6 +371,12 @@ function assertSideEffectApproval(workflow, input = {}) {
       "execute_request_resume 会真实索要简历；如需索要简历请允许 allow_request_resume，或关闭 execute_request_resume。"
     );
   }
+  if (workflow === RUN_WORKFLOWS.CHAT_SCREENING && !allowRequestResume) {
+    throw createWorkflowError(
+      "SIDE_EFFECT_APPROVAL_REQUIRED",
+      "chat_screening 会真实索要简历；如需索要简历请允许 allow_request_resume。"
+    );
+  }
 }
 
 function createWorkflowError(code, message) {
@@ -362,6 +392,7 @@ export function createDefaultExecutors() {
     cvSurvey: runCvStructureSurvey,
     recommendDryRun: runRecommendDryRunScreening,
     chatDryRun: runChatDryRunScreening,
+    chatScreening: runChatScreening,
     recommendFilters: executeRecommendFilters,
     recommendChatChain: runRecommendChatChain,
     searchChatChain: runSearchChatChain
@@ -401,6 +432,22 @@ function resolveChatDryRunLlm(workspaceRoot, input) {
       provider: buildMockChatScreeningProvider({
         decision: normalizeText(input.mock_decision) || "fail",
         postAction: normalizeText(input.mock_post_action) || "none",
+        reasoningText: normalizeText(input.mock_reasoning)
+      })
+    };
+  }
+  return resolveRequiredConfig(workspaceRoot);
+}
+
+function resolveChatScreeningLlm(workspaceRoot, input) {
+  if (input.mock_llm) {
+    return {
+      config: {
+        model: normalizeText(input.mock_model) || "mock-chat-screening"
+      },
+      provider: buildMockChatScreeningProvider({
+        decision: normalizeText(input.mock_chat_decision || input.mock_decision) || "fail",
+        postAction: normalizeText(input.mock_chat_post_action || input.mock_post_action) || "none",
         reasoningText: normalizeText(input.mock_reasoning)
       })
     };
@@ -464,6 +511,15 @@ function resolveRequiredConfig(workspaceRoot) {
 function parseNonNegativeInteger(value, fallback = 0) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseBooleanInput(value, fallback = null) {
+  if (typeof value === "boolean") return value;
+  if (value === undefined || value === null) return fallback;
+  const normalized = normalizeText(value).toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
 
 function createRunControlInterruptError({

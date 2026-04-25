@@ -492,18 +492,16 @@ export async function executeSearchChatAction(client, {
       selectedJob
     };
   }
-  await sleep(400);
+  await waitForSearchServiceJobConfirmEnabled(client, { timeoutMs: 4000 });
   const confirm = await confirmSearchServiceJobModal(client);
   const modalClosed = await client.waitFor((selectors) => {
-    const getText = (node) => (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
     const visible = (node) => {
       if (!node) return false;
       const style = window.getComputedStyle(node);
       const rect = node.getBoundingClientRect();
       return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
     };
-    return ![...document.querySelectorAll(".ant-lpt-modal-content, [role='dialog']")]
-      .some((node) => visible(node) && getText(node).includes("请选择开聊职位"));
+    return ![...document.querySelectorAll(selectors.serviceJobContainer)].some(visible);
   }, [searchSelectors], {
     timeoutMs: 8000,
     pollMs: 250
@@ -563,7 +561,13 @@ export async function selectSearchServiceJob(client, jobTitle) {
       const rect = node.getBoundingClientRect();
       return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
     };
-    const rows = [...document.querySelectorAll(selectors.serviceJobRow)]
+    const container = document.querySelector(selectors.serviceJobContainer);
+    const rowNodes = dedupeNodes([
+      ...document.querySelectorAll(selectors.serviceJobRow),
+      ...(container?.querySelectorAll(":scope > div > div > div") || []),
+      ...(container?.querySelectorAll("[class*='jobListWrap'] li, li, [role='option']") || [])
+    ]);
+    const rows = rowNodes
       .filter(visible)
       .map((node, index) => ({
         index,
@@ -599,11 +603,25 @@ export async function selectSearchServiceJob(client, jobTitle) {
       if (includes) return { ...includes, matchType: "includes" };
       return null;
     }
+
+    function dedupeNodes(nodes) {
+      const seen = new Set();
+      const result = [];
+      for (const node of nodes) {
+        if (!node || seen.has(node)) continue;
+        seen.add(node);
+        result.push(node);
+      }
+      return result;
+    }
   }, searchSelectors, jobTitle);
 }
 
-export async function confirmSearchServiceJobModal(client) {
-  return client.evaluate(() => {
+export async function waitForSearchServiceJobConfirmEnabled(client, {
+  timeoutMs = 4000,
+  pollMs = 200
+} = {}) {
+  return client.waitFor((selectors) => {
     const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
     const getText = (node) => normalize(node?.innerText || node?.textContent || "");
     const visible = (node) => {
@@ -612,8 +630,36 @@ export async function confirmSearchServiceJobModal(client) {
       const rect = node.getBoundingClientRect();
       return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
     };
-    const modal = [...document.querySelectorAll(".ant-lpt-modal-content, [role='dialog']")]
-      .find((node) => visible(node) && getText(node).includes("请选择开聊职位"));
+    const container = document.querySelector(selectors.serviceJobContainer);
+    const modal = container?.closest(".ant-lpt-modal-content")
+      || [...document.querySelectorAll(".ant-lpt-modal-content, [role='dialog']")]
+        .find((node) => visible(node) && getText(node).includes("请选择开聊职位"));
+    if (!modal) return false;
+    const buttons = [...modal.querySelectorAll("button")].filter(visible);
+    const confirm = buttons.find((node) => getText(node) === "确认")
+      || buttons.find((node) => getText(node).includes("确认") && String(node.className || "").includes("primary"))
+      || buttons.find((node) => String(node.className || "").includes("primary"));
+    return Boolean(confirm && !confirm.disabled && confirm.getAttribute("aria-disabled") !== "true");
+  }, [searchSelectors], {
+    timeoutMs,
+    pollMs
+  });
+}
+
+export async function confirmSearchServiceJobModal(client) {
+  return client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const getText = (node) => normalize(node?.innerText || node?.textContent || "");
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const container = document.querySelector(selectors.serviceJobContainer);
+    const modal = container?.closest(".ant-lpt-modal-content")
+      || [...document.querySelectorAll(".ant-lpt-modal-content, [role='dialog']")]
+        .find((node) => visible(node) && getText(node).includes("请选择开聊职位"));
     if (!modal) {
       return {
         clicked: false,
@@ -639,10 +685,11 @@ export async function confirmSearchServiceJobModal(client) {
       text: getText(confirm),
       className: String(confirm.className || "")
     };
-  });
+  }, searchSelectors);
 }
 
 export async function closeSearchModalToList(client) {
+  await closeSearchServiceJobModalIfOpen(client);
   const before = await client.evaluate((selectors) => Boolean(document.querySelector(selectors.modalRoot)), searchSelectors);
   if (!before) {
     return {
@@ -679,6 +726,53 @@ export async function closeSearchModalToList(client) {
     closed: Boolean(closed),
     closeMethod: click.clicked ? "close_button" : "none",
     click
+  };
+}
+
+async function closeSearchServiceJobModalIfOpen(client) {
+  const result = await client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const getText = (node) => normalize(node?.innerText || node?.textContent || "");
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const container = document.querySelector(selectors.serviceJobContainer);
+    const modal = container?.closest(".ant-lpt-modal-content")
+      || [...document.querySelectorAll(".ant-lpt-modal-content, [role='dialog']")]
+        .find((node) => visible(node) && getText(node).includes("请选择开聊职位"));
+    if (!modal || !visible(modal)) return { clicked: false, reason: "modal_not_open" };
+    const close = modal.querySelector(".ant-lpt-modal-close, [aria-label='Close'], [class*='modal-close']");
+    const buttons = [...modal.querySelectorAll("button")].filter((node) => visible(node) && !node.disabled);
+    const cancel = buttons.find((node) => getText(node) === "取消")
+      || buttons.find((node) => getText(node).includes("取消"));
+    const target = cancel || close;
+    if (!target) return { clicked: false, reason: "close_button_not_found" };
+    target.click();
+    return {
+      clicked: true,
+      text: getText(target),
+      className: String(target.className || "")
+    };
+  }, searchSelectors);
+  if (!result.clicked) return result;
+  const closed = await client.waitFor((selectors) => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    return ![...document.querySelectorAll(selectors.serviceJobContainer)].some(visible);
+  }, [searchSelectors], {
+    timeoutMs: 3000,
+    pollMs: 200
+  });
+  return {
+    ...result,
+    closed: Boolean(closed)
   };
 }
 

@@ -9,7 +9,15 @@ export const recommendSelectors = {
 };
 
 export const chatSelectors = {
+  jobFilter: ".im-ui-im-job-filter",
+  jobFilterSelector: ".im-ui-im-job-filter .ant-im-select-selector",
+  jobSelectionItem: ".im-ui-im-job-filter .ant-im-select-selection-item",
+  jobDropdown: ".ant-im-select-dropdown",
+  jobOption: ".ant-im-select-dropdown .ant-im-select-item-option",
+  unreadCheckbox: ".im-ui-unread-batch-entry label .ant-im-checkbox",
   conversationRow: ".im-ui-contact-list-item.im-ui-contact-item",
+  conversationTitleMain: ".im-ui-contact-item-contact .im-ui-contact-title-main",
+  conversationTitleSub: ".im-ui-contact-item-contact .im-ui-contact-title-sub",
   resumeActionButton: ".im-ui-action-button.action-item.action-resume",
   genericActionButton: ".im-ui-action-button.action-item",
   specialBrowseButton: "button, a, span, div",
@@ -22,7 +30,13 @@ export const chatSelectors = {
   chatHeaderExtInfo: ".im-ui-pro-chat-header-ext-info",
   chatHeaderExtContent: ".im-ui-pro-chat-header-ext-content",
   messageList: ".im-ui-message-list-wrapper.im-ui-chat-list, .im-ui-msg-list-content",
-  actionBar: ".chatwin-action, .im-ui-chat-input, .actions-left"
+  actionBar: ".chatwin-action, .im-ui-chat-input, .actions-left",
+  viewResumeButton: ".im-ui-pro-chat-header-basic-info-operate",
+  resumeDetailModalRoot: '[class*="resume-detail-modal-wrap"]',
+  resumeDetailModalPrintable: '[class*="resume-detail-modal-wrap"] .resume-detail-content-body.printable-content, [class*="resume-detail-modal-wrap"] .printable-content',
+  resumeDetailModalCloseButton: '[class*="resume-detail-modal-wrap"] [class*="closeBtn"], [class*="resume-detail-modal-wrap"] [class*="antlpticon-close"]',
+  requestResumeConfirmModal: ".ant-im-modal, [role=\"dialog\"]",
+  requestResumeSuccessMessage: ".im-ui-message-list-wrapper.im-ui-chat-list .im-ui-message-item-normal-message-wrapper, .im-ui-msg-list-content .im-ui-message-item-normal-message-wrapper"
 };
 
 export const resumeDetailSelectors = {
@@ -51,7 +65,7 @@ export const searchSelectors = {
   quickProfileTag: ".saved-condition-tag-root",
   quickProfileTitle: 'span[class*="tagTitle--"], [class*="tagTitle--"]',
   serviceJobContainer: '[id^="serviceJobListContainer"]',
-  serviceJobRow: '[id^="serviceJobListContainer"] [class*="jobListWrap"] li',
+  serviceJobRow: '[id^="serviceJobListContainer"] > div > div > div, [id^="serviceJobListContainer"] [class*="jobListWrap"] li',
   pagebar: ".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul",
   nextPageButton: ".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul > li.ant-lpt-pagination-next",
   disabledNextPageButton: ".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul > li.ant-lpt-pagination-next.ant-lpt-pagination-disabled"

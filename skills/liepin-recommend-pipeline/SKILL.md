@@ -17,7 +17,7 @@ chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepi
 - 推荐页筛选条件选项：`liepin_recommend_filter_options`
 - 推荐页筛选：`liepin_recommend_start`
 - 推荐后衔接聊天：`liepin_recommend_chat_start`
-- 进度/控制：`liepin_run_status` / `liepin_run_pause` / `liepin_run_resume` / `liepin_run_cancel`
+- 进度/控制：`liepin_run_progress`（统一查询推荐/搜索/chat 进度）/ `liepin_run_status` / `liepin_run_pause` / `liepin_run_resume` / `liepin_run_cancel`
 - 环境修复：`liepin_install` / `liepin_self_heal`
 
 ## Hard Rules (Must Follow)
@@ -25,6 +25,7 @@ chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepi
 - **路由护栏**
   - 推荐页筛选或推荐后串联聊天：只能走本 skill。
   - chat-only 语义（例如“只在聊天页筛选”）：必须切换 `liepin-chat`，不要在这里启动 `liepin_recommend_start` / `liepin_recommend_chat_start`。
+  - 如果用户已经给出 `job` + `unread_only` + `criteria` 这组聊天页参数，下一步必须是 `liepin_chat_start`，严禁用 `liepin_recommend_start` 承接。
 
 - **Preflight 强制**
   - 每次新的 `start` 之前必须先做 `liepin_doctor(target_page="recommend", fix=true)` 检查，确认环境可用。
@@ -54,7 +55,7 @@ chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepi
 
 - **异步 run 行为**
   - 拿到 `ACCEPTED + run_id` 后默认停止本轮，不自动高频轮询。
-  - 只有用户要求查进度时才调用 `liepin_run_status`。
+  - 只有用户要求查进度时才调用 `liepin_run_progress`；有明确 `run_id` 时传入该 `run_id`。
 
 ## Required Inputs
 

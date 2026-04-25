@@ -44,6 +44,7 @@ export const RUN_WORKFLOWS = {
   CV_SURVEY: "cv_survey",
   RECOMMEND_DRY_RUN_SCREENING: "recommend_dry_run_screening",
   CHAT_DRY_RUN_SCREENING: "chat_dry_run_screening",
+  CHAT_SCREENING: "chat_screening",
   RECOMMEND_CHAT_CHAIN: "recommend_chat_chain",
   SEARCH_CHAT_CHAIN: "search_chat_chain"
 };
@@ -72,10 +73,12 @@ export const TOOL_NAMES = {
   providerCheck: "liepin_provider_check",
   recommendFilterOptions: "liepin_recommend_filter_options",
   searchOptions: "liepin_search_options",
+  chatOptions: "liepin_chat_options",
   recommendStart: "liepin_recommend_start",
   searchStart: "liepin_search_start",
   chatStart: "liepin_chat_start",
   recommendChatStart: "liepin_recommend_chat_start",
+  runProgress: "liepin_run_progress",
   runStatus: "liepin_run_status",
   runPause: "liepin_run_pause",
   runResume: "liepin_run_resume",

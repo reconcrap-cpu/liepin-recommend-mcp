@@ -70,6 +70,8 @@ test("buildChatPageScreenInput keeps required chat source manifest", () => {
       rowKey: "row-2",
       rowType: "candidate",
       rowText: "李四 招聘实习生",
+      candidateName: "王萌",
+      candidateTitle: "招聘实习生",
       resumeState: "索要简历",
       actionLabels: ["索要简历"]
     }
@@ -79,6 +81,8 @@ test("buildChatPageScreenInput keeps required chat source manifest", () => {
   const input = buildChatPageScreenInput({ candidate, chatEntry, chatState: state });
 
   assert.equal(state.rowType, "candidate");
+  assert.equal(state.candidateName, "王萌");
+  assert.equal(input.candidate.name, "王萌");
   assert.equal(state.resumeState, "索要简历");
   assert.equal(input.state.hasRequestResumeButton, true);
   assert.deepEqual(input.manifest.missingRequiredSourceIds, []);

@@ -76,7 +76,11 @@ test("runInstall syncs MCP config and skill into trae-cn targets", () => {
     fs.mkdirSync(traeSkillsDir, { recursive: true });
     fs.writeFileSync(traeMcpPath, JSON.stringify({
       mcpServers: {
-        existing: { command: "node", args: ["existing.js"] }
+        existing: { command: "node", args: ["existing.js"] },
+        "liepin-recommend-mcp": {
+          command: "npx",
+          args: ["-y", "@reconcrap/liepin-recommend-mcp@0.1.8", "start"]
+        }
       }
     }, null, 2));
 
@@ -93,7 +97,12 @@ test("runInstall syncs MCP config and skill into trae-cn targets", () => {
       );
       const mcpConfig = JSON.parse(fs.readFileSync(traeMcpPath, "utf8"));
       assert.equal(Boolean(mcpConfig.mcpServers.existing), true);
+      assert.equal(Boolean(mcpConfig.mcpServers["liepin-recommend-mcp"]), false);
       assert.equal(Boolean(mcpConfig.mcpServers["liepin-mcp"]), true);
+      assert.deepEqual(
+        result.externalMcpConfigs.applied.find((item) => path.resolve(item.file) === path.resolve(traeMcpPath)).removedLegacyServers,
+        ["liepin-recommend-mcp"]
+      );
       assert.equal(
         mcpConfig.mcpServers["liepin-mcp"].env.LIEPIN_WORKSPACE_ROOT,
         path.resolve(workspaceRoot)

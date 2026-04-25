@@ -169,6 +169,72 @@ test("runWorker executes search chat-chain workflow with injected executor", asy
   });
 });
 
+test("runWorker executes chat screening workflow with required chat inputs", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.CHAT,
+      phase: "P31",
+      input: {
+        workflow: RUN_WORKFLOWS.CHAT_SCREENING,
+        mock_llm: true,
+        candidate_limit: 2,
+        scan_limit: 5,
+        job: "全部职位",
+        unread_only: false,
+        criteria: "筛选条件"
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        chatScreening: async (_browser, options) => {
+          assert.equal(options.candidateLimit, 2);
+          assert.equal(options.scanLimit, 5);
+          assert.equal(options.jobTitle, "全部职位");
+          assert.equal(options.unreadOnly, false);
+          assert.equal(options.criteria, "筛选条件");
+          return {
+            passed: true,
+            requestedCandidateLimit: 2,
+            requestResumeSuccesses: 2,
+            processedCandidates: 3,
+            screenableCandidates: 2,
+            skippedRows: 1,
+            llmCalls: 2,
+            actionClicks: 2,
+            stopReason: "candidate_limit_reached",
+            violations: [],
+            items: [
+              {
+                rowIndex: 0,
+                rowKey: "chat-row-1",
+                status: "request_resume_succeeded",
+                llmCalled: true,
+                chatLlmCalled: true,
+                decision: { decision: "pass", post_action: "request_resume" },
+                chatAction: { ok: true, clicked: true, status: "request_resume_succeeded" },
+                reasoningText: "chat screening cot"
+              }
+            ]
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.result.workflow, RUN_WORKFLOWS.CHAT_SCREENING);
+    assert.equal(stored.result.summary.requestResumeSuccesses, 2);
+    assert.equal(Boolean(stored.artifact_summary.csvPath), true);
+    const csvContent = fs.readFileSync(stored.artifact_summary.csvPath, "utf8");
+    assert.equal(csvContent.includes("chat screening cot"), true);
+  });
+});
+
 test("runWorker pauses search only at safe checkpoint point", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
   await withRuntimeHome(workspaceRoot, async () => {

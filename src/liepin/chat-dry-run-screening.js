@@ -178,6 +178,7 @@ export async function runChatDryRunScreening({
             decision: screening.decision,
             wouldPostAction: screening.decision.post_action,
             actionExecuted: false,
+            candidate: screenInput.candidate || {},
             beforeState,
             afterState,
             manifest: screenInput.manifest,

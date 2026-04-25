@@ -42,8 +42,16 @@ import {
   discoverSearchOptions,
   summarizeSearchOptions
 } from "./liepin/search-options.js";
+import {
+  discoverChatOptions,
+  summarizeChatOptions
+} from "./liepin/chat-options.js";
 import { collectChatConversationStates, sampleChatResumeDetailResumes } from "./liepin/chat-sampler.js";
 import { collectChatScreenInputs } from "./liepin/chat-screen-input.js";
+import {
+  runChatScreening,
+  summarizeChatScreening
+} from "./liepin/chat-screening.js";
 import { summarizeChatScreeningPolicy } from "./liepin/chat-state-policy.js";
 import { validateSurveyCvParsing } from "./liepin/cv-parser.js";
 import { auditSurveyPayloadCoverage } from "./liepin/cv-payload.js";
@@ -228,12 +236,15 @@ export async function runCli(argv = process.argv.slice(2)) {
   }
 
   if (["recommend", "chat", "recommend-chat", "search"].includes(command) && subcommand === "start") {
+    assertCliNotChatOnlyMisroute(command, flags);
     const input = parseStartInputFlags(command, flags, defaultDebugPort);
+    const effectiveKind = runKindForWorkflow(command, input.workflow);
     assertCliSideEffectApproval({
       needsChatAction: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
         || input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
       needsRequestResume: input.workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
-        && Boolean(input.execute_request_resume),
+        && Boolean(input.execute_request_resume)
+        || input.workflow === RUN_WORKFLOWS.CHAT_SCREENING,
       allowChatAction: Boolean(input.allow_chat_action),
       allowRequestResume: Boolean(input.allow_request_resume)
     });
@@ -259,7 +270,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     }
     const snapshot = createRunSnapshot({
       workspaceRoot,
-      kind: command,
+      kind: effectiveKind,
       mode: "async_workflow",
       phase: "P29",
       input
@@ -271,6 +282,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     printJson({
       status: "ACCEPTED",
       run_id: snapshot.run_id,
+      kind: effectiveKind,
       pid: worker.pid,
       state: snapshot.state,
       workflow: input.workflow,
@@ -329,6 +341,14 @@ async function runResearchCommand(subcommand, flags, workspaceRoot = getWorkspac
       openJobDropdown: flags["open-job-dropdown"] !== "false"
     });
     printJson({ ok: discovery.passed, summary: summarizeSearchOptions(discovery), discovery });
+    if (!discovery.passed) process.exitCode = 1;
+    return;
+  }
+  if (subcommand === "chat-options") {
+    const discovery = await discoverChatOptions({ port }, {
+      openJobDropdown: flags["open-job-dropdown"] !== "false"
+    });
+    printJson({ ok: discovery.passed, summary: summarizeChatOptions(discovery), discovery });
     if (!discovery.passed) process.exitCode = 1;
     return;
   }
@@ -546,6 +566,26 @@ async function runResearchCommand(subcommand, flags, workspaceRoot = getWorkspac
     if (!result.passed) process.exitCode = 1;
     return;
   }
+  if (subcommand === "chat-screening") {
+    assertCliSideEffectApproval({
+      needsRequestResume: true,
+      allowRequestResume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
+    });
+    const llm = resolveChatScreeningLlm(flags);
+    const result = await runChatScreening({ port }, {
+      candidateLimit: requirePositiveIntegerFlag(flags["candidate-limit"] || flags.candidateLimit, "--candidate-limit"),
+      scanLimit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+      jobTitle: requireTextFlag(flags.job || flags["job-title"] || flags.jobTitle, "--job"),
+      unreadOnly: parseRequiredBooleanFlag(flags["unread-only"] ?? flags.unreadOnly, "--unread-only"),
+      criteria: requireTextFlag(flags.criteria || flags["chat-criteria"] || flags.chatCriteria, "--criteria"),
+      maxPayloadChars: parsePositiveInteger(flags.maxChars || flags["max-chars"], null),
+      config: llm.config,
+      provider: llm.provider
+    });
+    printJson({ ok: result.passed, summary: summarizeChatScreening(result), result });
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
   if (subcommand === "cv-survey") {
     const survey = await runCvStructureSurvey({
       workspaceRoot: getWorkspaceRoot(),
@@ -613,6 +653,39 @@ function resolveDryRunLlm(flags) {
   const resolution = readScreeningConfig(getWorkspaceRoot());
   if (!resolution.ok) {
     throw new Error(`${resolution.error.message} 如需无密钥验收 dry-run，请显式传入 --mock-llm。`);
+  }
+  return {
+    config: resolution.config,
+    provider: null
+  };
+}
+
+function resolveChatScreeningLlm(flags) {
+  if (parseOptionalBoolean(flags["mock-llm"] ?? flags.mockLlm, false)) {
+    return {
+      config: {
+        model: normalizeText(flags["mock-model"] || flags.mockModel) || "mock-chat-screening"
+      },
+      provider: buildMockChatScreeningProvider({
+        decision: normalizeText(
+          flags["mock-chat-decision"]
+          || flags.mockChatDecision
+          || flags["mock-decision"]
+          || flags.mockDecision
+        ) || "fail",
+        postAction: normalizeText(
+          flags["mock-chat-post-action"]
+          || flags.mockChatPostAction
+          || flags["mock-post-action"]
+          || flags.mockPostAction
+        ) || "none",
+        reasoningText: normalizeText(flags["mock-reasoning"] || flags.mockReasoning)
+      })
+    };
+  }
+  const resolution = readScreeningConfig(getWorkspaceRoot());
+  if (!resolution.ok) {
+    throw new Error(`${resolution.error.message} 如需无密钥验收 chat screening，请显式传入 --mock-llm。`);
   }
   return {
     config: resolution.config,
@@ -731,6 +804,31 @@ async function runRunCommand(subcommand, flags) {
     printJson({ runs: listRuns(workspaceRoot).map((run) => (full ? run : summarizeRun(run))) });
     return;
   }
+  if (subcommand === "progress") {
+    const full = Boolean(flags.full);
+    const kind = normalizeText(flags.kind);
+    const includeCompleted = parseOptionalBoolean(flags["include-completed"] || flags.includeCompleted, true);
+    const limit = parsePositiveInteger(flags.limit, 5);
+    const allRuns = listRuns(workspaceRoot)
+      .filter((run) => !kind || run.kind === kind);
+    const activeRuns = allRuns.filter((run) => !isRunTerminal(run));
+    const runs = (includeCompleted ? allRuns : activeRuns)
+      .slice(0, limit)
+      .map((run) => (full ? run : buildRunStatusPayload(run)));
+    printJson({
+      status: "RUN_PROGRESS",
+      query: {
+        kind: kind || null,
+        include_completed: includeCompleted,
+        limit
+      },
+      active_count: activeRuns.length,
+      total_count: allRuns.length,
+      latest_run: runs[0] || null,
+      runs
+    });
+    return;
+  }
   if (!runId) {
     throw new Error("--run-id is required");
   }
@@ -827,6 +925,11 @@ function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT
     allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
   };
 
+  const requestedWorkflow = normalizeText(flags.workflow) || (kind === RUN_KINDS.CHAT ? RUN_WORKFLOWS.CHAT_SCREENING : null);
+  if (requestedWorkflow === RUN_WORKFLOWS.CHAT_SCREENING) {
+    return buildChatScreeningStartInputFlags(base, flags);
+  }
+
   if (kind === RUN_KINDS.RECOMMEND) {
     return {
       ...base,
@@ -846,9 +949,10 @@ function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT
   }
 
   if (kind === RUN_KINDS.CHAT) {
+    const workflow = normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN;
     return {
       ...base,
-      workflow: normalizeText(flags.workflow) || RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
+      workflow,
       candidate_limit: base.candidate_limit || 20,
       scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
       chat_entry_timeout_ms: parsePositiveInteger(flags["chat-entry-timeout-ms"] || flags.chatEntryTimeoutMs, 30000),
@@ -906,6 +1010,25 @@ function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT
   };
 }
 
+function buildChatScreeningStartInputFlags(base, flags) {
+  return {
+    ...base,
+    workflow: RUN_WORKFLOWS.CHAT_SCREENING,
+    candidate_limit: requirePositiveIntegerFlag(flags["candidate-limit"] || flags.candidateLimit, "--candidate-limit"),
+    scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
+    job: requireTextFlag(flags.job || flags["job-title"] || flags.jobTitle, "--job"),
+    unread_only: parseRequiredBooleanFlag(flags["unread-only"] ?? flags.unreadOnly, "--unread-only"),
+    criteria: requireTextFlag(flags.criteria || flags["chat-criteria"] || flags.chatCriteria, "--criteria"),
+    execute_request_resume: true,
+    allow_chat_action: false,
+    allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, true),
+    mock_decision: base.mock_decision || "fail",
+    mock_post_action: base.mock_post_action || "none",
+    mock_chat_decision: normalizeText(flags["mock-chat-decision"] || flags.mockChatDecision || base.mock_decision) || "fail",
+    mock_chat_post_action: normalizeText(flags["mock-chat-post-action"] || flags.mockChatPostAction || base.mock_post_action) || "none"
+  };
+}
+
 function printJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -930,6 +1053,34 @@ function parseOptionalBoolean(value, fallback) {
   return fallback;
 }
 
+function parseRequiredBooleanFlag(value, flagName) {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (value === undefined || value === null) {
+    throw new Error(`${flagName} is required and must be true|false.`);
+  }
+  const normalized = normalizeText(value).toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  throw new Error(`${flagName} must be true|false.`);
+}
+
+function requirePositiveIntegerFlag(value, flagName) {
+  const parsed = parsePositiveInteger(value, null);
+  if (!parsed) {
+    throw new Error(`${flagName} is required and must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function requireTextFlag(value, flagName) {
+  const text = normalizeText(value);
+  if (!text) {
+    throw new Error(`${flagName} is required.`);
+  }
+  return text;
+}
+
 function parsePositiveNumber(value, fallback = null) {
   const parsed = Number.parseFloat(String(value ?? ""));
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -947,6 +1098,19 @@ function assertCliSideEffectApproval({
   if (needsRequestResume && !allowRequestResume) {
     throw new Error("该命令会真实索要简历；请显式传入 --allow-request-resume。");
   }
+}
+
+function assertCliNotChatOnlyMisroute(command, flags = {}) {
+  if (command !== "recommend" && command !== "recommend-chat") return;
+  const workflow = normalizeText(flags.workflow);
+  const hasUnreadOnly = Object.hasOwn(flags, "unread-only") || Object.hasOwn(flags, "unreadOnly");
+  const hasChatWorkflow = workflow === RUN_WORKFLOWS.CHAT_SCREENING
+    || workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING
+    || workflow === RUN_WORKFLOWS.CHAT_SAMPLE;
+  if (!hasUnreadOnly && !hasChatWorkflow) return;
+  throw new Error(
+    "检测到 chat-only 参数被提交到了推荐页命令。聊天页筛选必须使用 `chat start --candidate-limit <n> --job <岗位> --unread-only true|false --criteria <条件>`。"
+  );
 }
 
 function buildSurveyProgressLogger(flags) {
@@ -979,9 +1143,10 @@ function buildHelp() {
     "  provider check [--mode both|recommend|chat]",
     "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
     "  search start [--debug-port 9222] --profile <搜索profile> --job <岗位> [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false]",
-    "  chat start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
+    "  chat start [--debug-port 9222] --candidate-limit <n> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--max-chars 12000] [--mock-llm] [--allow-request-resume true|false]",
     "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
     "  runs list [--full]",
+    "  runs progress [--kind recommend|search|chat|recommend-chat] [--include-completed true|false] [--limit 5] [--full]",
     "  runs status --run-id <id> [--full]",
     "  runs pause --run-id <id>",
     "  runs resume --run-id <id>",
@@ -994,6 +1159,7 @@ function buildHelp() {
     "  research recommend-sample --limit 5",
     "  research recommend-filter-discovery --debug-port 9222",
     "  research search-options --debug-port 9222",
+    "  research chat-options --debug-port 9222",
     "  research recommend-filter-execute --preset p17 [--restore false]",
     "  research recommend-scroll-audit [--max-passes 80] [--idle-passes 3] [--scroll-pages 4] [--bottom-settle-delay-ms 4000]",
     "  research recommend-traversal-audit [--steps 10] [--tab 推荐] [--step-delay-ms 3500]",
@@ -1007,6 +1173,7 @@ function buildHelp() {
     "  research chat-screen-inputs --limit 10 [--filter 有简历]",
     "  research chat-policy-audit --limit 20 [--filter 有简历]",
     "  research chat-action --action none|request_resume [--row-key <key>] [--row-index <n>] [--allow-request-resume]",
+    "  research chat-screening --candidate-limit <n> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--mock-llm] --allow-request-resume",
     "  research cv-survey --minimum 50 --batch 10 [--per-pass 10] [--rounds 4] [--no-progress]",
     "  research parse-survey --file <cv-structure-survey.json>",
     "  research audit-payload --file <cv-structure-survey.json> [--limit 10]"
@@ -1018,11 +1185,29 @@ function targetPageForCliStart(kind, input = {}) {
   if (
     kind === RUN_KINDS.CHAT
     || input.workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING
+    || input.workflow === RUN_WORKFLOWS.CHAT_SCREENING
     || input.workflow === RUN_WORKFLOWS.CHAT_SAMPLE
   ) {
     return "chat";
   }
   return "recommend";
+}
+
+function runKindForWorkflow(kind, workflow) {
+  if (
+    workflow === RUN_WORKFLOWS.CHAT_SCREENING
+    || workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING
+    || workflow === RUN_WORKFLOWS.CHAT_SAMPLE
+  ) {
+    return RUN_KINDS.CHAT;
+  }
+  if (workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) {
+    return RUN_KINDS.SEARCH;
+  }
+  if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN) {
+    return kind === RUN_KINDS.RECOMMEND_CHAT ? RUN_KINDS.RECOMMEND_CHAT : RUN_KINDS.RECOMMEND;
+  }
+  return kind;
 }
 
 function spawnWorkerProcess({ workspaceRoot, runId }) {

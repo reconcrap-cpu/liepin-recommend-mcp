@@ -529,6 +529,8 @@ export function buildRecommendBasicChatRowState({ candidate = {}, chatEntry = {}
     rowKey: candidate.resumeId || candidate.name || chatEntry.headerName || fallbackKey,
     rowType: "candidate",
     rowText,
+    candidateName: normalizeText(candidate.name || chatEntry.headerName),
+    candidateTitle: "",
     resumeState: inferRecommendBasicChatResumeState(chatEntry),
     actionLabels: extractKnownActionLabels(chatEntry.actionBarText)
   };
@@ -571,6 +573,8 @@ export function buildChatPageRowState({ candidate = {}, chatEntry = {} } = {}) {
     rowKey: base.rowKey || candidate.resumeId || candidate.name || "",
     rowType: base.rowType || "candidate",
     rowText,
+    candidateName: normalizeText(base.candidateName || candidate.name || chatEntry.headerName),
+    candidateTitle: normalizeText(base.candidateTitle),
     resumeState: base.resumeState || inferRecommendBasicChatResumeState(chatEntry),
     actionLabels: Array.isArray(base.actionLabels) && base.actionLabels.length > 0
       ? base.actionLabels

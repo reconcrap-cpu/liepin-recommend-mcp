@@ -28,6 +28,7 @@ const CSV_HEADER = [
 const SCREENING_WORKFLOWS = new Set([
   RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
   RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING,
+  RUN_WORKFLOWS.CHAT_SCREENING,
   RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
   RUN_WORKFLOWS.SEARCH_CHAT_CHAIN
 ]);
@@ -103,15 +104,15 @@ export function buildCandidateRows(workflow, items = []) {
 function buildCandidateRow(workflow, item = {}) {
   if (!wasLlmScreened(item)) return null;
   const recommendDecision = item.recommendDecision || (
-    workflow !== RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING ? item.decision : null
+    !isChatOnlyWorkflow(workflow) ? item.decision : null
   );
   const chatDecision = item.chatDecision || (
-    workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING ? item.decision : null
+    isChatOnlyWorkflow(workflow) ? item.decision : null
   );
   const finalDecision = chatDecision || recommendDecision || item.decision || null;
   const recommendCot = normalizeText(item.recommendReasoningText || item.reasoningText);
   const chatCot = normalizeText(item.chatReasoningText || (
-    workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING ? item.reasoningText : ""
+    isChatOnlyWorkflow(workflow) ? item.reasoningText : ""
   ));
   const cot = chatCot || recommendCot || normalizeText(item.reasoningText);
   const finalPassed = finalDecision?.decision === "pass";
@@ -120,10 +121,13 @@ function buildCandidateRow(workflow, item = {}) {
   const beforeState = item.beforeState || {};
   const label = firstNonEmpty(
     candidate.name,
+    item.candidateName,
     item.candidateLabel,
     candidate.label,
+    beforeState.candidateName,
     beforeState.rowText,
     item.rowText,
+    item.chatState?.candidateName,
     item.chatState?.rowText,
     item.searchSnapshot?.candidateLabel,
     item.recommendSnapshot?.candidateLabel
@@ -179,10 +183,15 @@ function resolveActionTaken(item = {}) {
 }
 
 function resolveResumeSource(workflow, item = {}) {
-  if (workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING) return "chat";
+  if (isChatOnlyWorkflow(workflow)) return "chat";
   if (workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) return "search";
   if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN && item.chatLlmCalled) return "recommend_chat";
   return "recommend";
+}
+
+function isChatOnlyWorkflow(workflow) {
+  return workflow === RUN_WORKFLOWS.CHAT_DRY_RUN_SCREENING
+    || workflow === RUN_WORKFLOWS.CHAT_SCREENING;
 }
 
 function buildInputSummaryRows(input = {}) {

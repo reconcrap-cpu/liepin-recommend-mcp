@@ -11,6 +11,8 @@ test("buildChatScreenInput creates auditable source manifest", () => {
       rowKey: "candidate-1",
       rowType: "candidate",
       rowText: "候选人 招聘实习生 你好",
+      candidateName: "候选人",
+      candidateTitle: "招聘实习生",
       resumeState: "索要简历",
       actionLabels: ["索要手机", "索要微信", "索要简历"]
     },
@@ -28,6 +30,8 @@ test("buildChatScreenInput creates auditable source manifest", () => {
   });
 
   assert.equal(input.schemaVersion, "liepin_chat_screen_input_v1");
+  assert.equal(input.candidate.name, "候选人");
+  assert.equal(input.candidate.title, "招聘实习生");
   assert.equal(input.state.resumeState, "索要简历");
   assert.equal(input.state.hasRequestResumeButton, true);
   assert.equal(input.manifest.missingRequiredSourceIds.length, 0);

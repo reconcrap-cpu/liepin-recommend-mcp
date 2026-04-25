@@ -18,7 +18,7 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 - 启动前检查：`liepin_doctor`（必须传 `target_page="search"`, `fix=true`；必要时 `provider_check=true`）
 - 搜索页可选项：`liepin_search_options`
 - 搜索页筛选并沟通：`liepin_search_start`
-- 进度/控制：`liepin_run_status` / `liepin_run_pause` / `liepin_run_resume` / `liepin_run_cancel`
+- 进度/控制：`liepin_run_progress`（统一查询推荐/搜索/chat 进度）/ `liepin_run_status` / `liepin_run_pause` / `liepin_run_resume` / `liepin_run_cancel`
 - 环境修复：`liepin_install` / `liepin_self_heal`
 
 ## Hard Rules (Must Follow)
@@ -51,7 +51,7 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 
 - **异步 run 行为**
   - `liepin_search_start` 是 async workflow。拿到 `ACCEPTED + run_id` 后默认停止本轮，不自动高频轮询。
-  - 只有用户要求查进度时才调用 `liepin_run_status`。
+  - 只有用户要求查进度时才调用 `liepin_run_progress`；有明确 `run_id` 时传入该 `run_id`。
 
 ## What The Workflow Does
 
@@ -86,4 +86,4 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 - 用中文。
 - 先给 preflight 结果，再列出 `liepin_search_options` 的 profile/job 选项。
 - 参数齐全后直接启动，不额外询问真实操作确认。
-- 启动成功后回传 `run_id`，提醒用户可用 `liepin_run_status` 查进度。
+- 启动成功后回传 `run_id`，提醒用户可用 `liepin_run_progress` 查进度。

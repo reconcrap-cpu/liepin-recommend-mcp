@@ -403,7 +403,7 @@ export function buildWorkflowArtifactPayloads(workflowResult = {}) {
       coverage: items.map((item) => ({
         index: item.index ?? item.rowIndex ?? null,
         rowKey: item.rowKey || item.chatState?.rowKey || item.candidate?.resumeId || "",
-        coverage: item.coverage || null,
+        coverage: item.coverage || item.payloadCoverage || null,
         recommendCoverage: item.recommendCoverage || null,
         missingRequiredSourceIds: item.missingRequiredSourceIds || item.chatInputManifest?.missingRequiredSourceIds || []
       }))
