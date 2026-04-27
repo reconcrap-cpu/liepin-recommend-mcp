@@ -147,7 +147,10 @@ export async function activateAndReadChatRow(client, index) {
     const row = activeRow || clickedRow || rows[0];
     if (!row) return null;
     const getText = (node) => (node?.innerText || "").replace(/\s+/g, " ").trim();
+    const getTitleOrText = (node) => (node?.getAttribute("title") || getText(node)).replace(/\s+/g, " ").trim();
     const rowText = getText(row);
+    const candidateName = getTitleOrText(row.querySelector(selectors.conversationTitleMain));
+    const candidateTitle = getTitleOrText(row.querySelector(selectors.conversationTitleSub));
     const resolvedIndex = rows.indexOf(row);
     const encodedExt = row.getAttribute("data-tlg-ext") || "";
     let contactId = "";
@@ -166,6 +169,8 @@ export async function activateAndReadChatRow(client, index) {
       rowKey: contactId || `${rowType}:${rowText.slice(0, 120)}`,
       rowType,
       rowText,
+      candidateName,
+      candidateTitle,
       resumeState: resumeButton ? getText(resumeButton) : (exactStateText || "UNKNOWN"),
       actionLabels: [...document.querySelectorAll(selectors.genericActionButton)]
         .map((node) => getText(node))
@@ -184,9 +189,28 @@ export async function activateAndReadChatRow(client, index) {
 
 export async function readResumeDetailSnapshot(client) {
   return client.evaluate((selectors) => {
-    const root = document.querySelector(selectors.pageWrap) || document.querySelector(selectors.printable);
-    if (!root) throw new Error("Resume detail page is not ready");
     const getText = (node) => (node?.innerText || "").replace(/\s+/g, " ").trim();
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none"
+        && style.visibility !== "hidden"
+        && rect.width > 0
+        && rect.height > 0;
+    };
+    const roots = [
+      ...document.querySelectorAll(selectors.pageWrap),
+      ...document.querySelectorAll(selectors.printable)
+    ].filter(visible);
+    const root = roots
+      .map((node) => ({
+        node,
+        textLength: getText(node).length,
+        htmlLength: node.innerHTML.length
+      }))
+      .sort((a, b) => b.textLength - a.textLength || b.htmlLength - a.htmlLength)[0]?.node || null;
+    if (!root) throw new Error("Resume detail page is not ready");
     const fullText = root.innerText || "";
     const firstLine = fullText
       .split(/\n+/)

@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 
-export const SERVER_NAME = "liepin-recommend-mcp";
+export const SERVER_NAME = "liepin-mcp";
 export const SERVER_VERSION = "0.1.0";
 export const DEFAULT_DEBUG_PORT = 9222;
 export const DEFAULT_TARGET_SURVEY_MIN = 50;
@@ -34,7 +34,8 @@ export const RUN_STATES = {
 export const RUN_KINDS = {
   RECOMMEND: "recommend",
   CHAT: "chat",
-  RECOMMEND_CHAT: "recommend-chat"
+  RECOMMEND_CHAT: "recommend-chat",
+  SEARCH: "search"
 };
 
 export const RUN_WORKFLOWS = {
@@ -43,7 +44,9 @@ export const RUN_WORKFLOWS = {
   CV_SURVEY: "cv_survey",
   RECOMMEND_DRY_RUN_SCREENING: "recommend_dry_run_screening",
   CHAT_DRY_RUN_SCREENING: "chat_dry_run_screening",
-  RECOMMEND_CHAT_CHAIN: "recommend_chat_chain"
+  CHAT_SCREENING: "chat_screening",
+  RECOMMEND_CHAT_CHAIN: "recommend_chat_chain",
+  SEARCH_CHAT_CHAIN: "search_chat_chain"
 };
 
 export const TERMINAL_RUN_STATES = new Set([
@@ -54,6 +57,7 @@ export const TERMINAL_RUN_STATES = new Set([
 
 export const LIEPIN_URLS = {
   recommend: "https://lpt.liepin.com/recommend",
+  search: "https://lpt.liepin.com/search",
   chat: "https://lpt.liepin.com/chat/im",
   resumeDetailFragment: "/resume/detail",
   safeHost: "safe.liepin.com",
@@ -62,10 +66,19 @@ export const LIEPIN_URLS = {
 
 export const TOOL_NAMES = {
   doctor: "liepin_doctor",
+  install: "liepin_install",
+  selfHeal: "liepin_self_heal",
+  skillExport: "liepin_skill_export",
+  externalAgentConfig: "liepin_external_agent_config",
   providerCheck: "liepin_provider_check",
+  recommendFilterOptions: "liepin_recommend_filter_options",
+  searchOptions: "liepin_search_options",
+  chatOptions: "liepin_chat_options",
   recommendStart: "liepin_recommend_start",
+  searchStart: "liepin_search_start",
   chatStart: "liepin_chat_start",
   recommendChatStart: "liepin_recommend_chat_start",
+  runProgress: "liepin_run_progress",
   runStatus: "liepin_run_status",
   runPause: "liepin_run_pause",
   runResume: "liepin_run_resume",
@@ -79,7 +92,9 @@ export const ARTIFACT_FILES = {
   llmRequest: "llm-request.json",
   decision: "decision.json",
   coverage: "coverage.json",
-  reasoning: "reasoning.log"
+  reasoning: "reasoning.log",
+  csv: "screening-report.csv",
+  checkpoint: "checkpoint.json"
 };
 
 export const RESEARCH_FILES = {

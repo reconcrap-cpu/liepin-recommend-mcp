@@ -138,9 +138,11 @@ export function buildChatScreenInput(raw) {
       screenableState: "索要简历"
     },
     candidate: {
+      name: normalizeText(row.candidateName),
       rowKey: row.rowKey || "",
       rowIndex: row.rowIndex ?? null,
       rowText: normalizeText(row.rowText),
+      title: normalizeText(row.candidateTitle),
       headerText: normalizeText(raw.candidateHeaderText),
       userInfoText: normalizeText(raw.userInfoText),
       resumeSummaryText: normalizeText(raw.resumeSummaryText)

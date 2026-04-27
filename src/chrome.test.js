@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   CdpPageClient,
   classifyLiepinPage,
+  findChromeExecutable,
+  getLiepinTargetUrl,
   isCdpRuntimeTimeoutError,
   isLiepinRiskPageUrl
 } from "./chrome.js";
@@ -16,8 +18,28 @@ test("classifyLiepinPage detects Liepin risk captcha before normal pages", () =>
 
 test("classifyLiepinPage classifies normal Liepin targets", () => {
   assert.equal(classifyLiepinPage("https://lpt.liepin.com/recommend#preview"), "recommend");
+  assert.equal(classifyLiepinPage("https://lpt.liepin.com/search#preview"), "search");
   assert.equal(classifyLiepinPage("https://lpt.liepin.com/chat/im#preview"), "chat");
   assert.equal(classifyLiepinPage("https://lpt.liepin.com/resume/detail?resIdEncode=abc"), "resume_detail");
+});
+
+test("getLiepinTargetUrl resolves workflow target URLs", () => {
+  assert.equal(getLiepinTargetUrl("recommend"), "https://lpt.liepin.com/recommend");
+  assert.equal(getLiepinTargetUrl("search"), "https://lpt.liepin.com/search");
+  assert.equal(getLiepinTargetUrl("chat"), "https://lpt.liepin.com/chat/im");
+});
+
+test("findChromeExecutable honors explicit Chrome env paths", () => {
+  const executable = findChromeExecutable({
+    platform: "win32",
+    env: {
+      CHROME_PATH: "C:\\Chrome\\chrome.exe",
+      PROGRAMFILES: "C:\\Program Files"
+    },
+    exists: (candidate) => candidate === "C:\\Chrome\\chrome.exe"
+  });
+
+  assert.equal(executable, "C:\\Chrome\\chrome.exe");
 });
 
 test("bringToFront is suppressed to keep Chrome in the background", async () => {

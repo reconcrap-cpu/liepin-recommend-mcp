@@ -1,5 +1,5 @@
 import { createPageClient, discoverLiepinPages, isLiepinRiskPageUrl } from "../chrome.js";
-import { DEFAULT_DEBUG_PORT, DEFAULT_RECOMMEND_STEP_DELAY_MS } from "../constants.js";
+import { DEFAULT_DEBUG_PORT, DEFAULT_RECOMMEND_STEP_DELAY_MS, RUN_WORKFLOWS } from "../constants.js";
 import { runStructuredScreening, SCREENING_MODES } from "../llm-adapter.js";
 import { normalizeText, sleep } from "../utils.js";
 import { auditCvPayloadCoverage, buildCvScreeningInput } from "./cv-payload.js";
@@ -16,14 +16,20 @@ export async function runRecommendDryRunScreening({
   port = DEFAULT_DEBUG_PORT
 } = {}, {
   candidateLimit = 20,
+  scanLimit = null,
   tabLabel = "推荐",
   startIndex = 0,
   stepDelayMs = DEFAULT_RECOMMEND_STEP_DELAY_MS,
   maxPayloadChars = null,
+  criteria = null,
+  operatorFilter = null,
   config = null,
   provider = null,
-  reasoningLogPath = null
+  reasoningLogPath = null,
+  onProgress = null
 } = {}) {
+  const requestedCandidateLimit = Math.max(1, candidateLimit);
+  const requestedScanLimit = Math.max(requestedCandidateLimit, scanLimit || requestedCandidateLimit * 10);
   const pages = await discoverLiepinPages({ port });
   if (!pages.recommend && pages.riskPage) {
     throw new Error(`检测到猎聘风控/验证码页，已停止推荐 dry-run screening：${pages.riskPage.url}`);
@@ -34,113 +40,191 @@ export async function runRecommendDryRunScreening({
 
   const client = await createPageClient(pages.recommend);
   try {
-    await assertNotRiskPage(client, "推荐 dry-run screening");
-    await ensureRecommendListReady(client);
-    await switchRecommendTab(client, tabLabel);
-    await resetRecommendListToTop(client);
-    await waitForRecommendCards(client);
-
-    const openAction = await openRecommendCardByIndex(client, startIndex);
-    await sleep(stepDelayMs);
-    await assertNotRiskPage(client, "打开推荐详情后检查");
-
     const items = [];
     const seenTextHashes = new Set();
     const violations = [];
     let llmCalls = 0;
-
-    for (let index = 0; index < candidateLimit; index += 1) {
-      const snapshot = await readRecommendModalSnapshot(client, { tabLabel });
-      if (seenTextHashes.has(snapshot.textHash)) {
-        violations.push({
-          code: "duplicate_or_stale_modal_snapshot",
-          index,
-          textHash: snapshot.textHash
-        });
-        break;
-      }
-      seenTextHashes.add(snapshot.textHash);
-
-      const screenInput = buildCvScreeningInput(snapshot, { maxPayloadChars });
-      const coverage = auditCvPayloadCoverage(snapshot, { maxPayloadChars });
-      if (!coverage.passed) {
-        violations.push({
-          code: "coverage_audit_failed",
-          index,
-          textHash: snapshot.textHash,
-          coverage
-        });
-      }
-
-      const screening = await runStructuredScreening({
-        mode: SCREENING_MODES.RECOMMEND,
-        screenInput,
-        config,
-        provider,
-        reasoningLogPath
-      });
-      llmCalls += 1;
-
-      const afterSnapshot = await readRecommendModalSnapshot(client, { tabLabel });
-      const drift = detectDryRunModalDrift(snapshot, afterSnapshot, index);
-      if (drift) violations.push(drift);
-
-      items.push({
-        index,
-        status: "screened",
-        tabLabel,
-        candidateLabel: screenInput.candidate?.label || snapshot.candidateLabel || "",
-        textHash: snapshot.textHash,
-        structureSignature: snapshot.structureSignature,
-        sectionTitles: snapshot.sectionTitles,
-        parsedPresentSectionIds: screenInput.manifest.parsedPresentSectionIds,
-        manifest: screenInput.manifest,
-        coverage,
-        llmCalled: true,
-        llmRequest: screening.request,
-        decision: screening.decision,
-        wouldPostAction: screening.decision.post_action,
-        actionExecuted: false,
-        reasoningCaptured: screening.reasoningCaptured,
-        dryRunModalStable: !drift
-      });
-
-      if (index >= candidateLimit - 1) break;
-      const nextAction = await clickRecommendNextAndWait(client, snapshot.domHash);
-      if (!nextAction.changed) {
-        violations.push({
-          code: "next_candidate_not_available",
-          index,
-          nextAction
-        });
-        break;
-      }
-      await sleep(stepDelayMs);
-      await assertNotRiskPage(client, "推荐详情下一位后检查");
-    }
-
-    const closeAction = await closeRecommendModalVerified(client);
-    const result = {
-      schemaVersion: RECOMMEND_DRY_RUN_SCHEMA_VERSION,
-      dryRun: true,
-      requestedCandidateLimit: candidateLimit,
-      processedCandidates: items.length,
-      screenableCandidates: items.length,
-      llmCalls,
+    let passedCandidates = 0;
+    const progressState = {
+      targetCandidates: requestedCandidateLimit,
+      scanLimit: requestedScanLimit,
+      processedCandidates: 0,
+      passedCandidates: 0,
+      screenableCandidates: 0,
+      llmCalls: 0,
       actionClicks: 0,
-      tabLabel,
-      startIndex,
-      stepDelayMs,
-      maxPayloadChars,
-      openAction,
-      closeAction,
-      violations,
-      items
+      currentCandidateLabel: "",
+      currentIndex: null,
+      lastItem: null
     };
-    return {
-      ...result,
-      passed: evaluateRecommendDryRunScreening(result).passed
+    const buildPartialWorkflowResult = (stage, statusMessage) => {
+      const result = buildRecommendDryRunResult({
+        candidateLimit: requestedCandidateLimit,
+        scanLimit: requestedScanLimit,
+        passedCandidates,
+        llmCalls,
+        tabLabel,
+        startIndex,
+        stepDelayMs,
+        maxPayloadChars,
+        openAction: null,
+        closeAction: null,
+        violations,
+        items,
+        passed: false,
+        stage,
+        statusMessage
+      });
+      return {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+        summary: summarizeRecommendDryRunScreening(result),
+        result
+      };
     };
+    const emitProgress = (stage, statusMessage, patch = {}) => {
+      Object.assign(progressState, patch);
+      if (typeof onProgress !== "function") return;
+      onProgress({
+        stage,
+        statusMessage,
+        progress: buildRecommendDryRunProgressSnapshot(progressState),
+        partialResult: buildPartialWorkflowResult(stage, statusMessage)
+      });
+    };
+
+    try {
+      await assertNotRiskPage(client, "推荐 dry-run screening");
+      await ensureRecommendListReady(client);
+      emitProgress("prepare_recommend_page", "已连接推荐页，开始 dry-run screening");
+      await switchRecommendTab(client, tabLabel);
+      await resetRecommendListToTop(client);
+      await waitForRecommendCards(client);
+
+      const openAction = await openRecommendCardByIndex(client, startIndex);
+      await sleep(stepDelayMs);
+      await assertNotRiskPage(client, "打开推荐详情后检查");
+
+      for (let index = 0; index < requestedScanLimit && passedCandidates < requestedCandidateLimit; index += 1) {
+        emitProgress("open_recommend_candidate", `正在扫描候选人 ${index + 1}/${requestedScanLimit}，目标通过 ${requestedCandidateLimit} 人`, {
+          currentIndex: index + 1
+        });
+        const snapshot = await readRecommendModalSnapshot(client, { tabLabel });
+        if (seenTextHashes.has(snapshot.textHash)) {
+          violations.push({
+            code: "duplicate_or_stale_modal_snapshot",
+            index,
+            textHash: snapshot.textHash
+          });
+          break;
+        }
+        seenTextHashes.add(snapshot.textHash);
+
+        const screenInput = buildCvScreeningInput(snapshot, { maxPayloadChars });
+        const coverage = auditCvPayloadCoverage(snapshot, { maxPayloadChars });
+        if (!coverage.passed) {
+          violations.push({
+            code: "coverage_audit_failed",
+            index,
+            textHash: snapshot.textHash,
+            coverage
+          });
+        }
+
+        emitProgress("recommend_llm", `正在评估推荐候选人：${screenInput.candidate?.label || snapshot.candidateLabel || `候选人 ${index + 1}`}`, {
+          currentCandidateLabel: screenInput.candidate?.label || snapshot.candidateLabel || "",
+          currentIndex: index + 1
+        });
+        const screening = await runStructuredScreening({
+          mode: SCREENING_MODES.RECOMMEND,
+          screenInput,
+          criteria,
+          operatorFilters: operatorFilter,
+          config,
+          provider,
+          reasoningLogPath
+        });
+        llmCalls += 1;
+
+        const afterSnapshot = await readRecommendModalSnapshot(client, { tabLabel });
+        const drift = detectDryRunModalDrift(snapshot, afterSnapshot, index);
+        if (drift) violations.push(drift);
+
+        const item = {
+          index,
+          status: "screened",
+          tabLabel,
+          candidateLabel: screenInput.candidate?.label || snapshot.candidateLabel || "",
+          textHash: snapshot.textHash,
+          structureSignature: snapshot.structureSignature,
+          sectionTitles: snapshot.sectionTitles,
+          parsedPresentSectionIds: screenInput.manifest.parsedPresentSectionIds,
+          manifest: screenInput.manifest,
+          coverage,
+          llmCalled: true,
+          llmRequest: screening.request,
+          decision: screening.decision,
+          wouldPostAction: screening.decision.post_action,
+          actionExecuted: false,
+          reasoningCaptured: screening.reasoningCaptured,
+          reasoningText: screening.reasoningText || "",
+          dryRunModalStable: !drift
+        };
+        if (screening.decision.decision === "pass") passedCandidates += 1;
+        items.push(item);
+
+        emitProgress("candidate_completed", `候选人已完成：${item.candidateLabel || `候选人 ${index + 1}`}`, {
+          processedCandidates: items.length,
+          passedCandidates,
+          screenableCandidates: items.length,
+          llmCalls,
+          currentCandidateLabel: item.candidateLabel || "",
+          currentIndex: index + 1,
+          lastItem: {
+            index: item.index,
+            status: item.status,
+            candidateLabel: item.candidateLabel
+          }
+        });
+
+        if (passedCandidates >= requestedCandidateLimit || index >= requestedScanLimit - 1) break;
+        const nextAction = await clickRecommendNextAndWait(client, snapshot.domHash);
+        if (!nextAction.changed) {
+          violations.push({
+            code: "next_candidate_not_available",
+            index,
+            nextAction
+          });
+          break;
+        }
+        await sleep(stepDelayMs);
+        await assertNotRiskPage(client, "推荐详情下一位后检查");
+      }
+
+      const closeAction = await closeRecommendModalVerified(client);
+      const result = buildRecommendDryRunResult({
+        candidateLimit: requestedCandidateLimit,
+        scanLimit: requestedScanLimit,
+        passedCandidates,
+        llmCalls,
+        tabLabel,
+        startIndex,
+        stepDelayMs,
+        maxPayloadChars,
+        openAction,
+        closeAction,
+        violations,
+        items
+      });
+      return {
+        ...result,
+        passed: evaluateRecommendDryRunScreening(result).passed
+      };
+    } catch (error) {
+      if (!error.partialResult) {
+        error.partialResult = buildPartialWorkflowResult("failed", error?.message || "Run failed");
+      }
+      throw error;
+    }
   } finally {
     await client.disconnect();
   }
@@ -169,7 +253,9 @@ export function summarizeRecommendDryRunScreening(result) {
   return {
     ok: Boolean(result?.passed),
     dryRun: Boolean(result?.dryRun),
+    requestedCandidateLimit: result?.requestedCandidateLimit || 0,
     processedCandidates: result?.processedCandidates || 0,
+    passedCandidates: result?.passedCandidates || 0,
     screenableCandidates: result?.screenableCandidates || 0,
     llmCalls: result?.llmCalls || 0,
     actionClicks: result?.actionClicks || 0,
@@ -187,7 +273,7 @@ export function evaluateRecommendDryRunScreening(result) {
   const coveragePassed = items.every((item) => item.coverage?.passed);
 
   if (!result?.dryRun) failures.push("not_dry_run");
-  if (items.length < requested) failures.push("not_enough_candidates");
+  if ((result?.passedCandidates || 0) < requested) failures.push("not_enough_passed_candidates");
   if (uniqueTextHashes.size < items.length) failures.push("duplicate_candidates");
   if ((result?.llmCalls || 0) !== items.length) failures.push("llm_call_count_mismatch");
   if ((result?.actionClicks || 0) !== 0) failures.push("action_clicks_not_zero");
@@ -202,6 +288,63 @@ export function evaluateRecommendDryRunScreening(result) {
     passed: failures.length === 0,
     coveragePassed,
     failures
+  };
+}
+
+function buildRecommendDryRunProgressSnapshot(state = {}) {
+  return {
+    workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+    targetCandidates: Math.max(1, state.targetCandidates || 1),
+    scanLimit: Math.max(1, state.scanLimit || state.targetCandidates || 1),
+    processedCandidates: state.processedCandidates || 0,
+    passedCandidates: state.passedCandidates || 0,
+    screenableCandidates: state.screenableCandidates || 0,
+    llmCalls: state.llmCalls || 0,
+    actionClicks: state.actionClicks || 0,
+    currentIndex: Number.isInteger(state.currentIndex) ? state.currentIndex : null,
+    currentCandidateLabel: state.currentCandidateLabel || "",
+    lastItem: state.lastItem || null
+  };
+}
+
+function buildRecommendDryRunResult({
+  candidateLimit,
+  scanLimit,
+  passedCandidates,
+  llmCalls,
+  tabLabel,
+  startIndex,
+  stepDelayMs,
+  maxPayloadChars,
+  openAction,
+  closeAction,
+  violations,
+  items,
+  passed = null,
+  stage = null,
+  statusMessage = null
+} = {}) {
+  return {
+    schemaVersion: RECOMMEND_DRY_RUN_SCHEMA_VERSION,
+    dryRun: true,
+    requestedCandidateLimit: candidateLimit,
+    scanLimit,
+    processedCandidates: items.length,
+    passedCandidates,
+    screenableCandidates: items.length,
+    llmCalls,
+    actionClicks: 0,
+    tabLabel,
+    startIndex,
+    stepDelayMs,
+    maxPayloadChars,
+    openAction,
+    closeAction,
+    stage,
+    statusMessage,
+    violations: [...violations],
+    items: [...items],
+    passed
   };
 }
 

@@ -1,4 +1,9 @@
-import { createPageClient, discoverLiepinPages, isLiepinRiskPageUrl } from "../chrome.js";
+import {
+  createPageClient,
+  discoverLiepinPages,
+  isCdpRuntimeTimeoutError,
+  isLiepinRiskPageUrl
+} from "../chrome.js";
 import {
   DEFAULT_DEBUG_PORT,
   DEFAULT_RECOMMEND_STEP_DELAY_MS,
@@ -37,6 +42,9 @@ export async function runRecommendChatChain({
   stepDelayMs = DEFAULT_RECOMMEND_STEP_DELAY_MS,
   chatEntryTimeoutMs = 30000,
   maxPayloadChars = null,
+  recommendCriteria = null,
+  chatCriteria = null,
+  operatorFilter = null,
   config = null,
   recommendProvider = null,
   chatProvider = null,
@@ -45,7 +53,20 @@ export async function runRecommendChatChain({
   onProgress = null
 } = {}) {
   const requestedCandidateLimit = Math.max(1, candidateLimit);
-  const requestedScanLimit = Math.max(requestedCandidateLimit, scanLimit || requestedCandidateLimit);
+  const requestedScanLimit = Math.max(requestedCandidateLimit, scanLimit || requestedCandidateLimit * 10);
+  const items = [];
+  const seenTextHashes = new Set();
+  const violations = [];
+  let recommendLlmCalls = 0;
+  let chatLlmCalls = 0;
+  let recommendChatClicks = 0;
+  let requestResumeClicks = 0;
+  let samePageChatEntries = 0;
+  let chatPageEntries = 0;
+  let screenableChatEntries = 0;
+  let skippedChatEntries = 0;
+  let chainedCandidates = 0;
+  let passedCandidates = 0;
   const progressState = {
     targetCandidates: requestedCandidateLimit,
     scanLimit: requestedScanLimit,
@@ -56,6 +77,7 @@ export async function runRecommendChatChain({
     chatPageEntries: 0,
     screenableChatEntries: 0,
     skippedChatEntries: 0,
+    passedCandidates: 0,
     recommendLlmCalls: 0,
     chatLlmCalls: 0,
     recommendChatClicks: 0,
@@ -65,13 +87,47 @@ export async function runRecommendChatChain({
     currentEntryKind: "",
     lastItem: null
   };
+  const buildPartialWorkflowResult = (stage, statusMessage) => {
+    const result = buildRecommendChatChainResult({
+      requestedCandidateLimit,
+      requestedScanLimit,
+      chainedCandidates,
+      passedCandidates,
+      samePageChatEntries,
+      chatPageEntries,
+      screenableChatEntries,
+      skippedChatEntries,
+      recommendLlmCalls,
+      chatLlmCalls,
+      recommendChatClicks,
+      requestResumeClicks,
+      executeRequestResume,
+      returnToRecommend,
+      tabLabel,
+      startIndex,
+      stepDelayMs,
+      chatEntryTimeoutMs,
+      maxPayloadChars,
+      violations,
+      items,
+      stage,
+      statusMessage,
+      passed: false
+    });
+    return {
+      workflow: RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN,
+      summary: summarizeRecommendChatChain(result),
+      result
+    };
+  };
   const emitProgress = (stage, statusMessage, patch = {}) => {
     Object.assign(progressState, patch);
     if (typeof onProgress !== "function") return;
     onProgress({
       stage,
       statusMessage,
-      progress: buildRecommendChatChainProgressSnapshot(progressState)
+      progress: buildRecommendChatChainProgressSnapshot(progressState),
+      partialResult: buildPartialWorkflowResult(stage, statusMessage)
     });
   };
   const pages = await discoverLiepinPages({ port });
@@ -84,22 +140,6 @@ export async function runRecommendChatChain({
 
   const client = await createPageClient(pages.recommend);
   try {
-    await assertNotRiskPage(client, "推荐到聊天串联");
-    await ensureRecommendListReady(client);
-    emitProgress("prepare_recommend_page", "已连接推荐页，开始推荐到聊天串联");
-
-    const items = [];
-    const seenTextHashes = new Set();
-    const violations = [];
-    let recommendLlmCalls = 0;
-    let chatLlmCalls = 0;
-    let recommendChatClicks = 0;
-    let requestResumeClicks = 0;
-    let samePageChatEntries = 0;
-    let chatPageEntries = 0;
-    let screenableChatEntries = 0;
-    let skippedChatEntries = 0;
-    let chainedCandidates = 0;
     const finalizeItemProgress = (item) => {
       const candidateLabel = buildCandidateProgressLabel(item.candidate);
       emitProgress(
@@ -108,6 +148,7 @@ export async function runRecommendChatChain({
         {
           scannedCandidates: items.length,
           chainedCandidates,
+          passedCandidates,
           samePageChatEntries,
           chatPageEntries,
           screenableChatEntries,
@@ -124,318 +165,338 @@ export async function runRecommendChatChain({
       );
     };
 
-    for (let scanIndex = 0; scanIndex < requestedScanLimit && chainedCandidates < requestedCandidateLimit; scanIndex += 1) {
-      emitProgress(
-        "open_recommend_candidate",
-        `正在处理第 ${scanIndex + 1}/${requestedScanLimit} 次扫描，目标串联 ${requestedCandidateLimit} 个候选人`,
-        {
-          currentScan: scanIndex + 1,
-          currentCandidateLabel: "",
-          currentRowKey: "",
-          currentEntryKind: ""
+    try {
+      await assertNotRiskPage(client, "推荐到聊天串联");
+      await ensureRecommendListReady(client);
+      emitProgress("prepare_recommend_page", "已连接推荐页，开始推荐到聊天串联");
+
+      for (let scanIndex = 0; scanIndex < requestedScanLimit && passedCandidates < requestedCandidateLimit; scanIndex += 1) {
+        emitProgress(
+          "open_recommend_candidate",
+          `正在处理第 ${scanIndex + 1}/${requestedScanLimit} 次扫描，目标通过 ${requestedCandidateLimit} 个候选人`,
+          {
+            currentScan: scanIndex + 1,
+            currentCandidateLabel: "",
+            currentRowKey: "",
+            currentEntryKind: ""
+          }
+        );
+        await prepareRecommendList(client, tabLabel);
+        const openIndex = startIndex + scanIndex;
+        const openAction = await openRecommendCardByIndex(client, openIndex);
+        await sleep(stepDelayMs);
+        await assertNotRiskPage(client, "打开推荐详情后检查");
+
+        const snapshot = await readRecommendModalSnapshot(client, { tabLabel });
+        const candidate = extractRecommendCandidateIdentity(snapshot);
+        const candidateLabel = buildCandidateProgressLabel(candidate);
+        emitProgress("recommend_llm", `正在评估推荐候选人：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
+          currentCandidateLabel: candidateLabel
+        });
+        const item = {
+          index: items.length,
+          scanIndex,
+          openIndex,
+          tabLabel,
+          openAction,
+          candidate,
+          recommendSnapshot: summarizeRecommendSnapshot(snapshot),
+          recommendLlmCalled: false,
+          recommendDecision: null,
+          recommendChatAction: null,
+          chatVerification: null,
+          chatState: null,
+          chatEligibility: null,
+          chatLlmCalled: false,
+          chatDecision: null,
+          chatInputManifest: null,
+          chatAction: null,
+          status: "pending",
+          violations: []
+        };
+
+        if (seenTextHashes.has(snapshot.textHash)) {
+          item.status = "duplicate_recommend_candidate";
+          item.violations.push({ code: "duplicate_recommend_candidate", textHash: snapshot.textHash });
+          violations.push({ code: "duplicate_recommend_candidate", scanIndex, textHash: snapshot.textHash });
+          items.push(item);
+          finalizeItemProgress(item);
+          await closeRecommendModalVerified(client);
+          continue;
         }
-      );
-      await prepareRecommendList(client, tabLabel);
-      const openIndex = startIndex + scanIndex;
-      const openAction = await openRecommendCardByIndex(client, openIndex);
-      await sleep(stepDelayMs);
-      await assertNotRiskPage(client, "打开推荐详情后检查");
+        seenTextHashes.add(snapshot.textHash);
 
-      const snapshot = await readRecommendModalSnapshot(client, { tabLabel });
-      const candidate = extractRecommendCandidateIdentity(snapshot);
-      const candidateLabel = buildCandidateProgressLabel(candidate);
-      emitProgress("recommend_llm", `正在评估推荐候选人：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
-        currentCandidateLabel: candidateLabel
-      });
-      const item = {
-        index: items.length,
-        scanIndex,
-        openIndex,
-        tabLabel,
-        openAction,
-        candidate,
-        recommendSnapshot: summarizeRecommendSnapshot(snapshot),
-        recommendLlmCalled: false,
-        recommendDecision: null,
-        recommendChatAction: null,
-        chatVerification: null,
-        chatState: null,
-        chatEligibility: null,
-        chatLlmCalled: false,
-        chatDecision: null,
-        chatInputManifest: null,
-        chatAction: null,
-        status: "pending",
-        violations: []
-      };
-
-      if (seenTextHashes.has(snapshot.textHash)) {
-        item.status = "duplicate_recommend_candidate";
-        item.violations.push({ code: "duplicate_recommend_candidate", textHash: snapshot.textHash });
-        violations.push({ code: "duplicate_recommend_candidate", scanIndex, textHash: snapshot.textHash });
-        items.push(item);
-        finalizeItemProgress(item);
-        await closeRecommendModalVerified(client);
-        continue;
-      }
-      seenTextHashes.add(snapshot.textHash);
-
-      const recommendScreenInput = buildCvScreeningInput(snapshot, { maxPayloadChars });
-      const coverage = auditCvPayloadCoverage(snapshot, { maxPayloadChars });
-      item.recommendInputManifest = recommendScreenInput.manifest;
-      item.recommendCoverage = coverage;
-      if (!coverage.passed) {
-        const violation = {
-          code: "recommend_coverage_audit_failed",
-          scanIndex,
-          textHash: snapshot.textHash,
-          coverage
-        };
-        item.violations.push(violation);
-        violations.push(violation);
-      }
-
-      const recommendScreening = await runStructuredScreening({
-        mode: SCREENING_MODES.RECOMMEND,
-        screenInput: recommendScreenInput,
-        config,
-        provider: recommendProvider
-      });
-      recommendLlmCalls += 1;
-      item.recommendLlmCalled = true;
-      item.recommendDecision = recommendScreening.decision;
-      item.recommendLlmRequest = recommendScreening.request;
-
-      if (!shouldEnterChat(item.recommendDecision)) {
-        item.status = "recommend_rejected";
-        item.chatAction = {
-          action: "none",
-          executed: false,
-          clicked: false,
-          status: "recommend_decision_no_chat"
-        };
-        items.push(item);
-        finalizeItemProgress(item);
-        await closeRecommendModalVerified(client);
-        continue;
-      }
-
-      item.chatButtonState = await readRecommendChatButtonState(client);
-      item.recommendChatAction = await clickRecommendChatButton(client);
-      if (item.recommendChatAction.clicked) recommendChatClicks += 1;
-      if (!item.recommendChatAction.clicked) {
-        const violation = {
-          code: "recommend_chat_button_not_clicked",
-          scanIndex,
-          reason: item.recommendChatAction.reason || "unknown"
-        };
-        item.status = "recommend_chat_action_failed";
-        item.violations.push(violation);
-        violations.push(violation);
-        items.push(item);
-        finalizeItemProgress(item);
-        await closeRecommendModalVerified(client);
-        continue;
-      }
-      emitProgress("wait_chat_entry", `已点击沟通，等待聊天入口：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
-        recommendLlmCalls,
-        recommendChatClicks
-      });
-
-      const chatVerification = await waitForRecommendChatEntryVerification({
-        port,
-        candidate,
-        sourceTargetId: pages.recommend.id,
-        timeoutMs: chatEntryTimeoutMs
-      });
-      item.chatVerification = summarizeChatVerification(chatVerification);
-      if (!chatVerification.verified) {
-        const violation = {
-          code: "chat_entry_not_verified",
-          scanIndex,
-          chatVerification: item.chatVerification
-        };
-        item.status = "chat_entry_failed";
-        item.violations.push(violation);
-        violations.push(violation);
-        items.push(item);
-        finalizeItemProgress(item);
-        if (returnToRecommend) await returnRecommendClientToList(client);
-        continue;
-      }
-      if (!isSupportedChatEntryKind(chatVerification.entryKind)) {
-        const violation = {
-          code: "chat_entry_not_supported",
-          scanIndex,
-          entryKind: chatVerification.entryKind || ""
-        };
-        item.status = "chat_entry_unsupported_kind";
-        item.violations.push(violation);
-        violations.push(violation);
-        items.push(item);
-        finalizeItemProgress(item);
-        if (returnToRecommend) await returnRecommendClientToList(client);
-        continue;
-      }
-
-      chainedCandidates += 1;
-      if (chatVerification.entryKind === "recommend_basic_chat_modal") {
-        samePageChatEntries += 1;
-      }
-      if (chatVerification.entryKind === "chat_page") {
-        chatPageEntries += 1;
-      }
-      const chatState = chatVerification.entryKind === "chat_page"
-        ? buildChatPageRowState({ candidate, chatEntry: chatVerification })
-        : buildRecommendBasicChatRowState({ candidate, chatEntry: chatVerification });
-      const eligibility = classifyChatScreeningEligibility(chatState);
-      item.chatState = chatState;
-      item.chatEligibility = eligibility;
-
-      if (!eligibility.shouldCallLlm) {
-        skippedChatEntries += 1;
-        item.status = "chat_skipped";
-        item.chatAction = {
-          action: "none",
-          executed: false,
-          clicked: false,
-          status: eligibility.skipReason
-        };
-        items.push(item);
-        finalizeItemProgress(item);
-        if (returnToRecommend) await returnRecommendClientToList(client);
-        continue;
-      }
-
-      screenableChatEntries += 1;
-      emitProgress("chat_llm", `正在评估聊天状态：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
-        chainedCandidates,
-        samePageChatEntries,
-        chatPageEntries,
-        screenableChatEntries,
-        recommendLlmCalls,
-        recommendChatClicks,
-        currentCandidateLabel: candidateLabel,
-        currentRowKey: chatState.rowKey || "",
-        currentEntryKind: chatVerification.entryKind || ""
-      });
-      const chatScreenInput = chatVerification.entryKind === "chat_page"
-        ? buildChatPageScreenInput({
-          candidate,
-          chatEntry: chatVerification,
-          chatState
-        })
-        : buildRecommendBasicChatScreenInput({
-          candidate,
-          chatEntry: chatVerification,
-          chatState
-        });
-      item.chatInputManifest = chatScreenInput.manifest;
-      if (chatScreenInput.manifest.missingRequiredSourceIds.length > 0) {
-        const violation = {
-          code: "chat_input_missing_required_sources",
-          scanIndex,
-          missingRequiredSourceIds: chatScreenInput.manifest.missingRequiredSourceIds
-        };
-        item.violations.push(violation);
-        violations.push(violation);
-      }
-
-      const chatScreening = await runStructuredScreening({
-        mode: SCREENING_MODES.CHAT,
-        screenInput: chatScreenInput,
-        config,
-        provider: chatProvider
-      });
-      chatLlmCalls += 1;
-      item.chatLlmCalled = true;
-      item.chatDecision = chatScreening.decision;
-      item.chatLlmRequest = chatScreening.request;
-      item.wouldPostAction = chatScreening.decision.post_action;
-
-      const shouldRequestResume = shouldExecuteRequestResume(chatScreening.decision);
-      if (shouldRequestResume && executeRequestResume) {
-        emitProgress("request_resume", `正在执行索要简历：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
-          chatLlmCalls,
-          currentCandidateLabel: candidateLabel,
-          currentRowKey: chatState.rowKey || "",
-          currentEntryKind: chatVerification.entryKind || ""
-        });
-        item.chatAction = chatVerification.entryKind === "chat_page"
-          ? await executeChatAction({
-            port,
-            pageTarget: chatVerification.target
-          }, {
-            action: CHAT_ACTIONS.REQUEST_RESUME,
-            rowKey: chatState.rowKey,
-            rowLimit: 40,
-            conversationFilterLabel: null
-          })
-          : await executeRecommendBasicChatRequestResume(client, {
-            candidate,
-            beforeState: chatState
-          });
-        if (item.chatAction.clicked) requestResumeClicks += 1;
-        if (!item.chatAction.ok) {
+        const recommendScreenInput = buildCvScreeningInput(snapshot, { maxPayloadChars });
+        const coverage = auditCvPayloadCoverage(snapshot, { maxPayloadChars });
+        item.recommendInputManifest = recommendScreenInput.manifest;
+        item.recommendCoverage = coverage;
+        if (!coverage.passed) {
           const violation = {
-            code: "request_resume_action_failed",
+            code: "recommend_coverage_audit_failed",
             scanIndex,
-            status: item.chatAction.status || ""
+            textHash: snapshot.textHash,
+            coverage
           };
           item.violations.push(violation);
           violations.push(violation);
         }
-      } else {
-        item.chatAction = {
-          action: shouldRequestResume ? CHAT_ACTIONS.REQUEST_RESUME : CHAT_ACTIONS.NONE,
-          executed: false,
-          clicked: false,
-          dryRun: shouldRequestResume && !executeRequestResume,
-          status: shouldRequestResume ? "request_resume_dry_run" : "chat_decision_no_action"
-        };
-      }
-      item.status = shouldRequestResume ? "chat_screened_request_resume" : "chat_screened_no_action";
-      items.push(item);
-      if (returnToRecommend) {
-        emitProgress("return_to_recommend", `正在返回推荐页：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
-          chatLlmCalls,
-          requestResumeClicks
-        });
-        const returned = await returnRecommendClientToList(client);
-        item.returnToRecommendResult = returned;
-      }
-      finalizeItemProgress(item);
-    }
 
-    const result = {
-      schemaVersion: RECOMMEND_CHAT_CHAIN_SCHEMA_VERSION,
-      requestedCandidateLimit,
-      scanLimit: requestedScanLimit,
-      scannedCandidates: items.length,
-      chainedCandidates,
-      samePageChatEntries,
-      chatPageEntries,
-      screenableChatEntries,
-      skippedChatEntries,
-      recommendLlmCalls,
-      chatLlmCalls,
-      recommendChatClicks,
-      requestResumeClicks,
-      actionClicks: recommendChatClicks + requestResumeClicks,
-      executeRequestResume,
-      returnToRecommend,
-      tabLabel,
-      startIndex,
-      stepDelayMs,
-      chatEntryTimeoutMs,
-      maxPayloadChars,
-      violations,
-      items
-    };
-    return {
-      ...result,
-      passed: evaluateRecommendChatChain(result).passed
-    };
+        const recommendScreening = await runStructuredScreening({
+          mode: SCREENING_MODES.RECOMMEND,
+          screenInput: recommendScreenInput,
+          criteria: recommendCriteria,
+          operatorFilters: operatorFilter,
+          config,
+          provider: recommendProvider
+        });
+        recommendLlmCalls += 1;
+        item.recommendLlmCalled = true;
+        item.recommendDecision = recommendScreening.decision;
+        item.recommendLlmRequest = recommendScreening.request;
+        item.recommendReasoningCaptured = recommendScreening.reasoningCaptured;
+        item.recommendReasoningText = recommendScreening.reasoningText || "";
+
+        if (!shouldEnterChat(item.recommendDecision)) {
+          item.status = "recommend_rejected";
+          item.chatAction = {
+            action: "none",
+            executed: false,
+            clicked: false,
+            status: "recommend_decision_no_chat"
+          };
+          items.push(item);
+          finalizeItemProgress(item);
+          await closeRecommendModalVerified(client);
+          continue;
+        }
+
+        item.chatButtonState = await readRecommendChatButtonState(client);
+        item.recommendChatAction = await clickRecommendChatButton(client);
+        if (item.recommendChatAction.clicked) recommendChatClicks += 1;
+        if (!item.recommendChatAction.clicked) {
+          const violation = {
+            code: "recommend_chat_button_not_clicked",
+            scanIndex,
+            reason: item.recommendChatAction.reason || "unknown"
+          };
+          item.status = "recommend_chat_action_failed";
+          item.violations.push(violation);
+          violations.push(violation);
+          items.push(item);
+          finalizeItemProgress(item);
+          await closeRecommendModalVerified(client);
+          continue;
+        }
+        emitProgress("wait_chat_entry", `已点击沟通，等待聊天入口：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
+          recommendLlmCalls,
+          recommendChatClicks
+        });
+
+        const chatVerification = await waitForRecommendChatEntryVerification({
+          port,
+          candidate,
+          sourceTargetId: pages.recommend.id,
+          timeoutMs: chatEntryTimeoutMs
+        });
+        item.chatVerification = summarizeChatVerification(chatVerification);
+        if (!chatVerification.verified) {
+          const violation = {
+            code: "chat_entry_not_verified",
+            scanIndex,
+            chatVerification: item.chatVerification
+          };
+          item.status = "chat_entry_failed";
+          item.violations.push(violation);
+          violations.push(violation);
+          items.push(item);
+          finalizeItemProgress(item);
+          if (returnToRecommend) await returnRecommendClientToList(client);
+          continue;
+        }
+        if (!isSupportedChatEntryKind(chatVerification.entryKind)) {
+          const violation = {
+            code: "chat_entry_not_supported",
+            scanIndex,
+            entryKind: chatVerification.entryKind || ""
+          };
+          item.status = "chat_entry_unsupported_kind";
+          item.violations.push(violation);
+          violations.push(violation);
+          items.push(item);
+          finalizeItemProgress(item);
+          if (returnToRecommend) await returnRecommendClientToList(client);
+          continue;
+        }
+
+        chainedCandidates += 1;
+        if (chatVerification.entryKind === "recommend_basic_chat_modal") {
+          samePageChatEntries += 1;
+        }
+        if (chatVerification.entryKind === "chat_page") {
+          chatPageEntries += 1;
+        }
+        const chatState = chatVerification.entryKind === "chat_page"
+          ? buildChatPageRowState({ candidate, chatEntry: chatVerification })
+          : buildRecommendBasicChatRowState({ candidate, chatEntry: chatVerification });
+        const eligibility = classifyChatScreeningEligibility(chatState);
+        item.chatState = chatState;
+        item.chatEligibility = eligibility;
+
+        if (!eligibility.shouldCallLlm) {
+          skippedChatEntries += 1;
+          item.status = "chat_skipped";
+          item.chatAction = {
+            action: "none",
+            executed: false,
+            clicked: false,
+            status: eligibility.skipReason
+          };
+          items.push(item);
+          finalizeItemProgress(item);
+          if (returnToRecommend) await returnRecommendClientToList(client);
+          continue;
+        }
+
+        screenableChatEntries += 1;
+        emitProgress("chat_llm", `正在评估聊天状态：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
+          chainedCandidates,
+          samePageChatEntries,
+          chatPageEntries,
+          screenableChatEntries,
+          recommendLlmCalls,
+          recommendChatClicks,
+          currentCandidateLabel: candidateLabel,
+          currentRowKey: chatState.rowKey || "",
+          currentEntryKind: chatVerification.entryKind || ""
+        });
+        const chatScreenInput = chatVerification.entryKind === "chat_page"
+          ? buildChatPageScreenInput({
+            candidate,
+            chatEntry: chatVerification,
+            chatState
+          })
+          : buildRecommendBasicChatScreenInput({
+            candidate,
+            chatEntry: chatVerification,
+            chatState
+          });
+        item.chatInputManifest = chatScreenInput.manifest;
+        if (chatScreenInput.manifest.missingRequiredSourceIds.length > 0) {
+          const violation = {
+            code: "chat_input_missing_required_sources",
+            scanIndex,
+            missingRequiredSourceIds: chatScreenInput.manifest.missingRequiredSourceIds
+          };
+          item.violations.push(violation);
+          violations.push(violation);
+        }
+
+        const chatScreening = await runStructuredScreening({
+          mode: SCREENING_MODES.CHAT,
+          screenInput: chatScreenInput,
+          criteria: chatCriteria,
+          operatorFilters: operatorFilter,
+          config,
+          provider: chatProvider
+        });
+        chatLlmCalls += 1;
+        item.chatLlmCalled = true;
+        item.chatDecision = chatScreening.decision;
+        item.chatLlmRequest = chatScreening.request;
+        item.chatReasoningCaptured = chatScreening.reasoningCaptured;
+        item.chatReasoningText = chatScreening.reasoningText || "";
+        item.wouldPostAction = chatScreening.decision.post_action;
+        if (isFinalPass(chatScreening.decision)) passedCandidates += 1;
+
+        const shouldRequestResume = shouldExecuteRequestResume(chatScreening.decision);
+        if (shouldRequestResume && executeRequestResume) {
+          emitProgress("request_resume", `正在执行索要简历：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
+            chatLlmCalls,
+            passedCandidates,
+            currentCandidateLabel: candidateLabel,
+            currentRowKey: chatState.rowKey || "",
+            currentEntryKind: chatVerification.entryKind || ""
+          });
+          item.chatAction = chatVerification.entryKind === "chat_page"
+            ? await executeChatAction({
+              port,
+              pageTarget: chatVerification.target
+            }, {
+              action: CHAT_ACTIONS.REQUEST_RESUME,
+              rowKey: chatState.rowKey,
+              rowLimit: 40,
+              conversationFilterLabel: null
+            })
+            : await executeRecommendBasicChatRequestResume(client, {
+              candidate,
+              beforeState: chatState
+            });
+          if (item.chatAction.clicked) requestResumeClicks += 1;
+          if (!item.chatAction.ok) {
+            const violation = {
+              code: "request_resume_action_failed",
+              scanIndex,
+              status: item.chatAction.status || ""
+            };
+            item.violations.push(violation);
+            violations.push(violation);
+          }
+        } else {
+          item.chatAction = {
+            action: shouldRequestResume ? CHAT_ACTIONS.REQUEST_RESUME : CHAT_ACTIONS.NONE,
+            executed: false,
+            clicked: false,
+            dryRun: shouldRequestResume && !executeRequestResume,
+            status: shouldRequestResume ? "request_resume_dry_run" : "chat_decision_no_action"
+          };
+        }
+        item.status = shouldRequestResume ? "chat_screened_request_resume" : "chat_screened_no_action";
+        items.push(item);
+        if (returnToRecommend) {
+          emitProgress("return_to_recommend", `正在返回推荐页：${candidateLabel || `扫描 ${scanIndex + 1}`}`, {
+            chatLlmCalls,
+            passedCandidates,
+            requestResumeClicks
+          });
+          const returned = await returnRecommendClientToList(client);
+          item.returnToRecommendResult = returned;
+        }
+        finalizeItemProgress(item);
+      }
+
+      const result = buildRecommendChatChainResult({
+        requestedCandidateLimit,
+        requestedScanLimit,
+        chainedCandidates,
+        passedCandidates,
+        samePageChatEntries,
+        chatPageEntries,
+        screenableChatEntries,
+        skippedChatEntries,
+        recommendLlmCalls,
+        chatLlmCalls,
+        recommendChatClicks,
+        requestResumeClicks,
+        executeRequestResume,
+        returnToRecommend,
+        tabLabel,
+        startIndex,
+        stepDelayMs,
+        chatEntryTimeoutMs,
+        maxPayloadChars,
+        violations,
+        items
+      });
+      return {
+        ...result,
+        passed: evaluateRecommendChatChain(result).passed
+      };
+    } catch (error) {
+      if (!error.partialResult) {
+        error.partialResult = buildPartialWorkflowResult("failed", error?.message || "Run failed");
+      }
+      throw error;
+    }
   } finally {
     await client.disconnect();
   }
@@ -468,6 +529,8 @@ export function buildRecommendBasicChatRowState({ candidate = {}, chatEntry = {}
     rowKey: candidate.resumeId || candidate.name || chatEntry.headerName || fallbackKey,
     rowType: "candidate",
     rowText,
+    candidateName: normalizeText(candidate.name || chatEntry.headerName),
+    candidateTitle: "",
     resumeState: inferRecommendBasicChatResumeState(chatEntry),
     actionLabels: extractKnownActionLabels(chatEntry.actionBarText)
   };
@@ -510,6 +573,8 @@ export function buildChatPageRowState({ candidate = {}, chatEntry = {} } = {}) {
     rowKey: base.rowKey || candidate.resumeId || candidate.name || "",
     rowType: base.rowType || "candidate",
     rowText,
+    candidateName: normalizeText(base.candidateName || candidate.name || chatEntry.headerName),
+    candidateTitle: normalizeText(base.candidateTitle),
     resumeState: base.resumeState || inferRecommendBasicChatResumeState(chatEntry),
     actionLabels: Array.isArray(base.actionLabels) && base.actionLabels.length > 0
       ? base.actionLabels
@@ -551,7 +616,7 @@ export function evaluateRecommendChatChain(result = {}) {
   if (result.schemaVersion && result.schemaVersion !== RECOMMEND_CHAT_CHAIN_SCHEMA_VERSION) {
     failures.push("unsupported_schema_version");
   }
-  if ((result.chainedCandidates || 0) < requested) failures.push("not_enough_chained_candidates");
+  if ((result.passedCandidates || 0) < requested) failures.push("not_enough_passed_candidates");
   if (((result.samePageChatEntries || 0) + (result.chatPageEntries || 0)) < (result.chainedCandidates || 0)) {
     failures.push("verified_chat_entry_count_mismatch");
   }
@@ -595,6 +660,7 @@ export function summarizeRecommendChatChain(result = {}) {
     requestedCandidateLimit: result.requestedCandidateLimit || 0,
     scannedCandidates: result.scannedCandidates || 0,
     chainedCandidates: result.chainedCandidates || 0,
+    passedCandidates: result.passedCandidates || 0,
     samePageChatEntries: result.samePageChatEntries || 0,
     chatPageEntries: result.chatPageEntries || 0,
     screenableChatEntries: result.screenableChatEntries || 0,
@@ -612,6 +678,7 @@ export function summarizeRecommendChatChain(result = {}) {
 function buildRecommendChatChainProgressSnapshot(state = {}) {
   const targetCandidates = Math.max(1, state.targetCandidates || 1);
   const chainedCandidates = state.chainedCandidates || 0;
+  const passedCandidates = state.passedCandidates || 0;
   const recommendChatClicks = state.recommendChatClicks || 0;
   const requestResumeClicks = state.requestResumeClicks || 0;
   return {
@@ -619,9 +686,10 @@ function buildRecommendChatChainProgressSnapshot(state = {}) {
     targetCandidates,
     scanLimit: Math.max(targetCandidates, state.scanLimit || targetCandidates),
     currentScan: Number.isInteger(state.currentScan) && state.currentScan > 0 ? state.currentScan : null,
-    currentTarget: Math.min(chainedCandidates + 1, targetCandidates),
+    currentTarget: Math.min(passedCandidates + 1, targetCandidates),
     scannedCandidates: state.scannedCandidates || 0,
     chainedCandidates,
+    passedCandidates,
     samePageChatEntries: state.samePageChatEntries || 0,
     chatPageEntries: state.chatPageEntries || 0,
     screenableChatEntries: state.screenableChatEntries || 0,
@@ -638,12 +706,73 @@ function buildRecommendChatChainProgressSnapshot(state = {}) {
   };
 }
 
+function buildRecommendChatChainResult({
+  requestedCandidateLimit,
+  requestedScanLimit,
+  chainedCandidates,
+  passedCandidates,
+  samePageChatEntries,
+  chatPageEntries,
+  screenableChatEntries,
+  skippedChatEntries,
+  recommendLlmCalls,
+  chatLlmCalls,
+  recommendChatClicks,
+  requestResumeClicks,
+  executeRequestResume,
+  returnToRecommend,
+  tabLabel,
+  startIndex,
+  stepDelayMs,
+  chatEntryTimeoutMs,
+  maxPayloadChars,
+  violations,
+  items,
+  stage = null,
+  statusMessage = null,
+  passed = null
+} = {}) {
+  return {
+    schemaVersion: RECOMMEND_CHAT_CHAIN_SCHEMA_VERSION,
+    requestedCandidateLimit,
+    scanLimit: requestedScanLimit,
+    scannedCandidates: items.length,
+    chainedCandidates,
+    passedCandidates,
+    samePageChatEntries,
+    chatPageEntries,
+    screenableChatEntries,
+    skippedChatEntries,
+    recommendLlmCalls,
+    chatLlmCalls,
+    recommendChatClicks,
+    requestResumeClicks,
+    actionClicks: recommendChatClicks + requestResumeClicks,
+    executeRequestResume,
+    returnToRecommend,
+    tabLabel,
+    startIndex,
+    stepDelayMs,
+    chatEntryTimeoutMs,
+    maxPayloadChars,
+    stage,
+    statusMessage,
+    violations: [...violations],
+    items: [...items],
+    passed
+  };
+}
+
 function shouldEnterChat(decision = {}) {
   return decision.decision === "pass" && decision.post_action === "chat";
 }
 
 function shouldExecuteRequestResume(decision = {}) {
   return decision.decision === "pass" && decision.post_action === CHAT_ACTIONS.REQUEST_RESUME;
+}
+
+function isFinalPass(decision = {}) {
+  return decision.decision === "pass";
 }
 
 function isSupportedChatEntryKind(entryKind) {
@@ -682,11 +811,45 @@ async function waitForRecommendCards(client) {
     timeoutMs: 10000,
     pollMs: 250
   });
-  if (!ready) throw new Error("推荐页候选人卡片未出现");
+  if (ready) return {
+    ready: true,
+    refreshed: false
+  };
+  const refresh = await refreshRecommendPage(client);
+  const readyAfterRefresh = await client.waitFor((selector) => Boolean(document.querySelector(selector)), [recommendSelectors.card], {
+    timeoutMs: 15000,
+    pollMs: 250
+  });
+  if (!readyAfterRefresh) throw new Error(`推荐页候选人卡片未出现，刷新后仍为空：${refresh?.url || ""}`);
+  return {
+    ready: true,
+    refreshed: true
+  };
 }
 
 async function openRecommendCardByIndex(client, index) {
-  const result = await client.evaluate(({ selector, cardIndex }) => {
+  let result = await readAndOpenRecommendCardByIndex(client, index);
+  if (!result.clicked && result.cardCount === 0) {
+    await refreshRecommendPage(client);
+    await waitForRecommendCards(client);
+    result = await readAndOpenRecommendCardByIndex(client, index);
+  }
+  if (!result.clicked) {
+    throw new Error(`未找到可打开的推荐卡片 index=${index} cardCount=${result.cardCount}`);
+  }
+  const ready = await client.waitFor((selector) => {
+    const node = document.querySelector(selector);
+    return node && (node.textContent || node.innerText || "").trim().length > 100;
+  }, [recommendSelectors.modalPrintable], {
+    timeoutMs: 10000,
+    pollMs: 250
+  });
+  if (!ready) throw new Error("推荐详情弹窗未出现");
+  return result;
+}
+
+async function readAndOpenRecommendCardByIndex(client, index) {
+  return client.evaluate(({ selector, cardIndex }) => {
     const cards = [...document.querySelectorAll(selector)];
     const card = cards[cardIndex];
     if (!card) return { clicked: false, reason: "card_not_found", cardCount: cards.length };
@@ -706,18 +869,23 @@ async function openRecommendCardByIndex(client, index) {
     selector: recommendSelectors.card,
     cardIndex: index
   });
-  if (!result.clicked) {
-    throw new Error(`未找到可打开的推荐卡片 index=${index} cardCount=${result.cardCount}`);
-  }
-  const ready = await client.waitFor((selector) => {
-    const node = document.querySelector(selector);
-    return node && (node.textContent || node.innerText || "").trim().length > 100;
-  }, [recommendSelectors.modalPrintable], {
-    timeoutMs: 10000,
+}
+
+async function refreshRecommendPage(client) {
+  const refresh = await client.evaluate(() => {
+    const currentUrl = location.href;
+    location.reload();
+    return {
+      reloaded: true,
+      url: currentUrl
+    };
+  });
+  await client.waitFor(() => ["interactive", "complete"].includes(document.readyState), [], {
+    timeoutMs: 15000,
     pollMs: 250
   });
-  if (!ready) throw new Error("推荐详情弹窗未出现");
-  return result;
+  await sleep(2000);
+  return refresh;
 }
 
 async function closeRecommendModalVerified(client) {
@@ -927,11 +1095,48 @@ function summarizeRecommendChatChainProgressItem(item = {}) {
 }
 
 async function returnRecommendClientToList(client) {
-  const closeAction = await closeRecommendModalVerified(client);
+  let closeAction = null;
+  try {
+    closeAction = await closeRecommendModalVerified(client);
+  } catch (error) {
+    if (!isCdpRuntimeTimeoutError(error)) throw error;
+    closeAction = await recoverRecommendListAfterRuntimeTimeout(client, error);
+  }
   return {
     ok: Boolean(closeAction?.closed),
     closeAction
   };
+}
+
+async function recoverRecommendListAfterRuntimeTimeout(client, error) {
+  const recovery = {
+    closed: false,
+    closeMethod: "page_reload_after_runtime_timeout",
+    reason: error?.message || "runtime_timeout",
+    runtimeTimedOut: true,
+    reload: null,
+    cleanup: null
+  };
+  try {
+    recovery.reload = await client.send("Page.reload", {
+      ignoreCache: true
+    });
+    await sleep(3000);
+    recovery.cleanup = await clearRecommendBlockingOverlaysToList(client, {
+      timeoutMs: 15000,
+      maxAttempts: 4
+    });
+    recovery.closed = Boolean(recovery.cleanup?.closed);
+    recovery.after = recovery.cleanup?.after || null;
+    if (!recovery.closed && !recovery.reason) {
+      recovery.reason = recovery.cleanup?.reason || "reload_cleanup_not_closed";
+    }
+  } catch (recoveryError) {
+    recovery.recoveryError = {
+      message: recoveryError?.message || String(recoveryError)
+    };
+  }
+  return recovery;
 }
 
 async function assertNotRiskPage(client, actionLabel) {

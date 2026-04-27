@@ -9,6 +9,7 @@ import { ENV_HOME, RUN_WORKFLOWS } from "./constants.js";
 import {
   buildWorkflowArtifactPayloads,
   createRunSnapshot,
+  markRunFailed,
   markRunCompleted,
   readRunState,
   requestPause,
@@ -184,6 +185,89 @@ test("buildWorkflowArtifactPayloads prefers candidate name over generic label", 
   });
 
   assert.equal(payloads.screenInput.items[0].candidateLabel, "程女士");
+});
+
+test("markRunFailed persists partial workflow artifacts when partial result is provided", () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-run-state-"));
+  withRuntimeHome(workspaceRoot, () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: "recommend",
+      input: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING
+      }
+    });
+    const failed = markRunFailed(workspaceRoot, snapshot.run_id, {
+      code: "WORKER_UNEXPECTED_ERROR",
+      message: "test failed"
+    }, {
+      workflowResult: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+        summary: {
+          ok: false
+        },
+        result: {
+          items: [
+            {
+              index: 0,
+              rowKey: "row-1",
+              llmCalled: true,
+              reasoningText: "partial cot",
+              decision: { decision: "fail", post_action: "none" }
+            }
+          ]
+        }
+      }
+    });
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.artifact_summary.itemCount, 1);
+    const decisionArtifact = JSON.parse(fs.readFileSync(failed.artifacts.decisionPath, "utf8"));
+    assert.equal(decisionArtifact.decisions.length, 1);
+    const csvContent = fs.readFileSync(failed.artifact_summary.csvPath, "utf8");
+    assert.equal(csvContent.includes("partial cot"), true);
+  });
+});
+
+test("markRunCompleted writes screening CSV without sensitive config fields", () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-run-state-"));
+  withRuntimeHome(workspaceRoot, () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: "recommend",
+      input: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+        criteria: "筛选 LLM 经验",
+        baseUrl: "https://should-not-appear",
+        apiKey: "sk-should-not-appear",
+        model: "model-should-not-appear"
+      }
+    });
+    const completed = markRunCompleted(workspaceRoot, snapshot.run_id, {
+      workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+      summary: { ok: true },
+      result: {
+        dryRun: true,
+        items: [
+          {
+            index: 0,
+            candidateLabel: "候选人A",
+            status: "screened",
+            llmCalled: true,
+            decision: { decision: "pass", post_action: "chat" },
+            reasoningText: "原生 CoT"
+          }
+        ]
+      }
+    });
+    assert.equal(Boolean(completed.artifact_summary.csvPath), true);
+    const content = fs.readFileSync(completed.artifact_summary.csvPath, "utf8");
+    assert.equal(content.includes("判断依据(CoT)"), true);
+    assert.equal(content.includes("候选人A"), true);
+    assert.equal(content.includes("原生 CoT"), true);
+    assert.equal(content.includes("apiKey"), false);
+    assert.equal(content.includes("sk-should-not-appear"), false);
+    assert.equal(content.includes("model-should-not-appear"), false);
+  });
 });
 
 function withRuntimeHome(workspaceRoot, callback) {

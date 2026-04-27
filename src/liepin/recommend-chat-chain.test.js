@@ -70,6 +70,8 @@ test("buildChatPageScreenInput keeps required chat source manifest", () => {
       rowKey: "row-2",
       rowType: "candidate",
       rowText: "李四 招聘实习生",
+      candidateName: "王萌",
+      candidateTitle: "招聘实习生",
       resumeState: "索要简历",
       actionLabels: ["索要简历"]
     }
@@ -79,6 +81,8 @@ test("buildChatPageScreenInput keeps required chat source manifest", () => {
   const input = buildChatPageScreenInput({ candidate, chatEntry, chatState: state });
 
   assert.equal(state.rowType, "candidate");
+  assert.equal(state.candidateName, "王萌");
+  assert.equal(input.candidate.name, "王萌");
   assert.equal(state.resumeState, "索要简历");
   assert.equal(input.state.hasRequestResumeButton, true);
   assert.deepEqual(input.manifest.missingRequiredSourceIds, []);
@@ -88,6 +92,7 @@ test("evaluateRecommendChatChain rejects resume requests from non-screenable cha
   const evaluation = evaluateRecommendChatChain({
     requestedCandidateLimit: 1,
     chainedCandidates: 1,
+    passedCandidates: 0,
     samePageChatEntries: 1,
     executeRequestResume: true,
     requestResumeClicks: 1,
@@ -117,6 +122,7 @@ test("summarizeRecommendChatChain reports P22 chain counters", () => {
     requestedCandidateLimit: 5,
     scannedCandidates: 6,
     chainedCandidates: 5,
+    passedCandidates: 5,
     samePageChatEntries: 5,
     chatPageEntries: 0,
     screenableChatEntries: 4,
@@ -136,6 +142,7 @@ test("summarizeRecommendChatChain reports P22 chain counters", () => {
     requestedCandidateLimit: 5,
     scannedCandidates: 6,
     chainedCandidates: 5,
+    passedCandidates: 5,
     samePageChatEntries: 5,
     chatPageEntries: 0,
     screenableChatEntries: 4,
@@ -154,6 +161,7 @@ test("evaluateRecommendChatChain accepts verified chat_page entry kind", () => {
   const evaluation = evaluateRecommendChatChain({
     requestedCandidateLimit: 1,
     chainedCandidates: 1,
+    passedCandidates: 1,
     samePageChatEntries: 0,
     chatPageEntries: 1,
     executeRequestResume: true,

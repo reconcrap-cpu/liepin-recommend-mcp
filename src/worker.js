@@ -9,6 +9,7 @@ import {
 import { getWorkspaceRoot, readScreeningConfig } from "./config.js";
 import {
   appendRunEvent,
+  getRunArtifactPaths,
   markRunCanceled,
   markRunCompleted,
   markRunFailed,
@@ -27,15 +28,28 @@ import {
   summarizeChatDryRunScreening
 } from "./liepin/chat-dry-run-screening.js";
 import {
+  runChatScreening,
+  summarizeChatScreening
+} from "./liepin/chat-screening.js";
+import {
   buildMockRecommendScreeningProvider,
   runRecommendDryRunScreening,
   summarizeRecommendDryRunScreening
 } from "./liepin/recommend-dry-run-screening.js";
 import {
+  buildRecommendFilterPlanFromText,
+  executeRecommendFilters,
+  shouldApplyRecommendFilter
+} from "./liepin/recommend-filter-executor.js";
+import {
   runRecommendChatChain,
   summarizeRecommendChatChain
 } from "./liepin/recommend-chat-chain.js";
-import { normalizeText, parsePositiveInteger } from "./utils.js";
+import {
+  runSearchChatChain,
+  summarizeSearchChatChain
+} from "./liepin/search-chat-chain.js";
+import { normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
 
 export async function runWorker({
   workspaceRoot = getWorkspaceRoot(),
@@ -54,11 +68,45 @@ export async function runWorker({
     markRunCanceled(workspaceRoot, runId, { reason: "cancelled_before_start" });
     return;
   }
+  const selectedWorkflow = normalizeText(snapshot.input?.workflow) || legacyWorkflowForKind(snapshot.kind);
 
   markRunRunning(workspaceRoot, runId);
   appendRunEvent(readRunState(workspaceRoot, runId), "worker_started", {
     pid: process.pid
   });
+
+  let lastPartialWorkflowResult = null;
+  const checkRunControl = (partialResult = null) => {
+    if (partialResult) {
+      lastPartialWorkflowResult = partialResult;
+    }
+    const current = readRunState(workspaceRoot, runId);
+    if (current?.control?.cancel_requested) {
+      throw createRunControlInterruptError({
+        code: "RUN_CANCELED",
+        message: "Run canceled by operator.",
+        partialResult: lastPartialWorkflowResult
+      });
+    }
+    if (current?.control?.pause_requested) {
+      throw createRunControlInterruptError({
+        code: "RUN_PAUSED",
+        message: "Run paused by operator.",
+        partialResult: lastPartialWorkflowResult
+      });
+    }
+  };
+  const onProgress = (event = {}) => {
+    updateRunProgress(workspaceRoot, runId, event);
+    if (event.partialResult) {
+      lastPartialWorkflowResult = event.partialResult;
+    }
+    if (selectedWorkflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) return;
+    checkRunControl(lastPartialWorkflowResult);
+  };
+  const onSafeControlPoint = (partialResult = null) => {
+    checkRunControl(partialResult || lastPartialWorkflowResult);
+  };
 
   try {
     if (snapshot.control?.pause_requested) {
@@ -70,15 +118,29 @@ export async function runWorker({
       workspaceRoot,
       snapshot,
       executors,
-      onProgress: (event) => {
-        updateRunProgress(workspaceRoot, runId, event);
-      }
+      onProgress,
+      onSafeControlPoint
     });
     markRunCompleted(workspaceRoot, runId, result);
   } catch (error) {
+    const partialWorkflowResult = error?.partialResult || lastPartialWorkflowResult || null;
+    if (error?.code === "RUN_PAUSED") {
+      markRunPaused(workspaceRoot, runId, partialWorkflowResult || {
+        reason: "paused_by_operator"
+      });
+      return;
+    }
+    if (error?.code === "RUN_CANCELED") {
+      markRunCanceled(workspaceRoot, runId, partialWorkflowResult || {
+        reason: "canceled_by_operator"
+      });
+      return;
+    }
     markRunFailed(workspaceRoot, runId, {
       code: error?.code || "WORKER_UNEXPECTED_ERROR",
       message: error?.message || "Unexpected worker error"
+    }, {
+      workflowResult: partialWorkflowResult
     });
   }
 }
@@ -87,7 +149,8 @@ export async function executeWorkflow({
   workspaceRoot,
   snapshot,
   executors = createDefaultExecutors(),
-  onProgress = null
+  onProgress = null,
+  onSafeControlPoint = null
 }) {
   const input = snapshot.input || {};
   const workflow = normalizeText(input.workflow) || legacyWorkflowForKind(snapshot.kind);
@@ -150,12 +213,16 @@ export async function executeWorkflow({
     const llm = resolveRecommendDryRunLlm(workspaceRoot, input);
     const result = await executors.recommendDryRun({ port }, {
       candidateLimit: parsePositiveInteger(input.candidate_limit, parsePositiveInteger(input.sample_limit, 20)),
+      scanLimit: parsePositiveInteger(input.scan_limit, null),
       tabLabel: normalizeText(input.tab) || "推荐",
       startIndex: parseNonNegativeInteger(input.start_index, 0),
       stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
       maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      criteria: normalizeText(input.criteria) || null,
+      operatorFilter: normalizeText(input.filter) || null,
       config: llm.config,
-      provider: llm.provider
+      provider: llm.provider,
+      onProgress
     });
     return {
       workflow,
@@ -171,8 +238,10 @@ export async function executeWorkflow({
       rowLimit: parsePositiveInteger(input.row_limit, 40),
       maxScrollPasses: parsePositiveInteger(input.max_scroll_passes, 3),
       conversationFilterLabel: normalizeText(input.filter) || "有简历",
+      criteria: normalizeText(input.criteria) || null,
       config: llm.config,
-      provider: llm.provider
+      provider: llm.provider,
+      onProgress
     });
     return {
       workflow,
@@ -181,8 +250,42 @@ export async function executeWorkflow({
     };
   }
 
+  if (workflow === RUN_WORKFLOWS.CHAT_SCREENING) {
+    const llm = resolveChatScreeningLlm(workspaceRoot, input);
+    const result = await executors.chatScreening({ port }, {
+      candidateLimit: parsePositiveInteger(input.candidate_limit, null),
+      scanLimit: parsePositiveInteger(input.scan_limit, null),
+      jobTitle: normalizeText(input.job || input.job_title) || null,
+      unreadOnly: parseBooleanInput(input.unread_only, null),
+      maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      criteria: normalizeText(input.criteria) || null,
+      config: llm.config,
+      provider: llm.provider,
+      onProgress
+    });
+    return {
+      workflow,
+      summary: summarizeChatScreening(result),
+      result
+    };
+  }
+
   if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN) {
     const llm = resolveRecommendChatChainLlm(workspaceRoot, input);
+    const filterPlan = buildRecommendFilterPlanFromText(input.filter);
+    let filterExecution = null;
+    if (shouldApplyRecommendFilter(input.filter) && filterPlan.length > 0) {
+      filterExecution = await executors.recommendFilters({ port }, {
+        plan: filterPlan,
+        restore: false
+      });
+      if (!filterExecution?.passed) {
+        throw createWorkflowError(
+          "RECOMMEND_FILTER_APPLY_FAILED",
+          `推荐页筛选条件应用失败：${JSON.stringify(filterExecution?.actions || filterExecution || {})}`
+        );
+      }
+    }
     const result = await executors.recommendChatChain({ port }, {
       candidateLimit: parsePositiveInteger(input.candidate_limit, 5),
       scanLimit: parsePositiveInteger(input.scan_limit, null),
@@ -191,15 +294,52 @@ export async function executeWorkflow({
       stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
       chatEntryTimeoutMs: parsePositiveInteger(input.chat_entry_timeout_ms, 30000),
       maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      recommendCriteria: normalizeText(input.recommend_criteria || input.criteria) || null,
+      chatCriteria: normalizeText(input.chat_criteria || input.criteria) || null,
+      operatorFilter: normalizeText(input.filter) || null,
       executeRequestResume: Boolean(input.execute_request_resume),
       config: llm.config,
       recommendProvider: llm.recommendProvider,
       chatProvider: llm.chatProvider,
       onProgress
     });
+    if (filterExecution) {
+      result.filterExecution = filterExecution;
+    }
     return {
       workflow,
       summary: summarizeRecommendChatChain(result),
+      result
+    };
+  }
+
+  if (workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN) {
+    const llm = resolveSearchChatChainLlm(workspaceRoot, input);
+    const artifacts = snapshot.artifacts || getRunArtifactPaths(workspaceRoot, snapshot.run_id);
+    const checkpoint = readJsonFile(artifacts.checkpointPath, null);
+    const result = await executors.searchChatChain({ port }, {
+      candidateLimit: parsePositiveInteger(input.candidate_limit, 5),
+      scanLimit: parsePositiveInteger(input.scan_limit, null),
+      profile: normalizeText(input.profile || input.search_profile) || null,
+      jobTitle: normalizeText(input.job || input.job_title) || null,
+      hideRead: parseBooleanInput(input.hide_read, false),
+      startIndex: parseNonNegativeInteger(input.start_index, 0),
+      stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
+      maxPayloadChars: parsePositiveInteger(input.max_chars, null),
+      criteria: normalizeText(input.criteria || input.recommend_criteria) || null,
+      operatorFilter: normalizeText(input.filter) || null,
+      config: llm.config,
+      provider: llm.provider,
+      checkpoint,
+      onCheckpoint: async (checkpointPayload) => {
+        writeJsonFile(artifacts.checkpointPath, checkpointPayload);
+      },
+      onSafeControlPoint,
+      onProgress
+    });
+    return {
+      workflow,
+      summary: summarizeSearchChatChain(result),
       result
     };
   }
@@ -208,16 +348,34 @@ export async function executeWorkflow({
 }
 
 function assertSideEffectApproval(workflow, input = {}) {
-  if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN && !input.allow_chat_action) {
+  const allowChatAction = input.allow_chat_action ?? true;
+  const allowRequestResume = input.allow_request_resume ?? true;
+  if (workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN && !allowChatAction) {
     throw createWorkflowError(
       "SIDE_EFFECT_APPROVAL_REQUIRED",
-      "recommend_chat_chain 会点击推荐沟通按钮；请显式传入 allow_chat_action/--allow-chat-action。"
+      "recommend_chat_chain 会点击推荐沟通按钮；如需正式串联请允许 allow_chat_action，或改用 dry-run workflow。"
     );
   }
-  if (input.execute_request_resume && !input.allow_request_resume) {
+  if (workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN && !allowChatAction) {
     throw createWorkflowError(
       "SIDE_EFFECT_APPROVAL_REQUIRED",
-      "execute_request_resume 会真实索要简历；请显式传入 allow_request_resume/--allow-request-resume。"
+      "search_chat_chain 会点击搜索页立即沟通按钮；如需正式串联请允许 allow_chat_action。"
+    );
+  }
+  if (
+    workflow === RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN
+    && input.execute_request_resume
+    && !allowRequestResume
+  ) {
+    throw createWorkflowError(
+      "SIDE_EFFECT_APPROVAL_REQUIRED",
+      "execute_request_resume 会真实索要简历；如需索要简历请允许 allow_request_resume，或关闭 execute_request_resume。"
+    );
+  }
+  if (workflow === RUN_WORKFLOWS.CHAT_SCREENING && !allowRequestResume) {
+    throw createWorkflowError(
+      "SIDE_EFFECT_APPROVAL_REQUIRED",
+      "chat_screening 会真实索要简历；如需索要简历请允许 allow_request_resume。"
     );
   }
 }
@@ -235,7 +393,10 @@ export function createDefaultExecutors() {
     cvSurvey: runCvStructureSurvey,
     recommendDryRun: runRecommendDryRunScreening,
     chatDryRun: runChatDryRunScreening,
-    recommendChatChain: runRecommendChatChain
+    chatScreening: runChatScreening,
+    recommendFilters: executeRecommendFilters,
+    recommendChatChain: runRecommendChatChain,
+    searchChatChain: runSearchChatChain
   };
 }
 
@@ -243,6 +404,7 @@ function legacyWorkflowForKind(kind) {
   if (kind === RUN_KINDS.RECOMMEND) return RUN_WORKFLOWS.RECOMMEND_SAMPLE;
   if (kind === RUN_KINDS.CHAT) return RUN_WORKFLOWS.CHAT_SAMPLE;
   if (kind === RUN_KINDS.RECOMMEND_CHAT) return RUN_WORKFLOWS.CV_SURVEY;
+  if (kind === RUN_KINDS.SEARCH) return RUN_WORKFLOWS.SEARCH_CHAT_CHAIN;
   return "";
 }
 
@@ -278,6 +440,22 @@ function resolveChatDryRunLlm(workspaceRoot, input) {
   return resolveRequiredConfig(workspaceRoot);
 }
 
+function resolveChatScreeningLlm(workspaceRoot, input) {
+  if (input.mock_llm) {
+    return {
+      config: {
+        model: normalizeText(input.mock_model) || "mock-chat-screening"
+      },
+      provider: buildMockChatScreeningProvider({
+        decision: normalizeText(input.mock_chat_decision || input.mock_decision) || "fail",
+        postAction: normalizeText(input.mock_chat_post_action || input.mock_post_action) || "none",
+        reasoningText: normalizeText(input.mock_reasoning)
+      })
+    };
+  }
+  return resolveRequiredConfig(workspaceRoot);
+}
+
 function resolveRecommendChatChainLlm(workspaceRoot, input) {
   if (input.mock_llm) {
     return {
@@ -304,6 +482,22 @@ function resolveRecommendChatChainLlm(workspaceRoot, input) {
   };
 }
 
+function resolveSearchChatChainLlm(workspaceRoot, input) {
+  if (input.mock_llm) {
+    return {
+      config: {
+        model: normalizeText(input.mock_model) || "mock-search-chat-chain"
+      },
+      provider: buildMockRecommendScreeningProvider({
+        decision: normalizeText(input.mock_recommend_decision || input.mock_decision) || "pass",
+        postAction: normalizeText(input.mock_recommend_post_action || input.mock_post_action) || "chat",
+        reasoningText: normalizeText(input.mock_reasoning)
+      })
+    };
+  }
+  return resolveRequiredConfig(workspaceRoot);
+}
+
 function resolveRequiredConfig(workspaceRoot) {
   const resolution = readScreeningConfig(workspaceRoot);
   if (!resolution.ok) {
@@ -318,6 +512,28 @@ function resolveRequiredConfig(workspaceRoot) {
 function parseNonNegativeInteger(value, fallback = 0) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseBooleanInput(value, fallback = null) {
+  if (typeof value === "boolean") return value;
+  if (value === undefined || value === null) return fallback;
+  const normalized = normalizeText(value).toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function createRunControlInterruptError({
+  code,
+  message,
+  partialResult = null
+} = {}) {
+  const error = new Error(message || "Run control interrupted.");
+  error.code = code || "RUN_INTERRUPTED";
+  if (partialResult) {
+    error.partialResult = partialResult;
+  }
+  return error;
 }
 
 const currentFilePath = fileURLToPath(import.meta.url);

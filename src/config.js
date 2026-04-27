@@ -58,23 +58,52 @@ export function validateScreeningConfig(config) {
       message: "screening-config.json 缺失或格式无效，请填写 baseUrl、apiKey、model。"
     };
   }
+  const baseUrl = normalizeText(config.baseUrl);
+  const apiKey = normalizeText(config.apiKey);
+  const model = normalizeText(config.model);
   const missing = [];
-  if (!normalizeText(config.baseUrl)) missing.push("baseUrl");
-  if (!normalizeText(config.apiKey)) missing.push("apiKey");
-  if (!normalizeText(config.model)) missing.push("model");
+  if (!baseUrl) missing.push("baseUrl");
+  if (!apiKey) missing.push("apiKey");
+  if (!model) missing.push("model");
   if (missing.length > 0) {
     return {
       ok: false,
       message: `screening-config.json 缺少必填字段：${missing.join(", ")}`
     };
   }
-  if (/^replace-with/i.test(normalizeText(config.apiKey))) {
+  const placeholderFields = [];
+  if (isTemplateBaseUrl(baseUrl)) placeholderFields.push("baseUrl");
+  if (isTemplateApiKey(apiKey)) placeholderFields.push("apiKey");
+  if (isTemplateModel(model)) placeholderFields.push("model");
+  if (placeholderFields.length > 0) {
     return {
       ok: false,
-      message: "screening-config.json 的 apiKey 仍是模板占位符，请填写真实值"
+      message: `screening-config.json 仍包含模板占位值：${placeholderFields.join(", ")}`
     };
   }
   return { ok: true };
+}
+
+function isTemplateBaseUrl(value) {
+  const normalized = normalizeComparableUrl(value);
+  return (
+    normalized === "https://your-llm-endpoint.example.com/v1"
+    || normalized.includes("your-llm-endpoint.example.com")
+  );
+}
+
+function isTemplateApiKey(value) {
+  const normalized = normalizeText(value);
+  return /^replace-with/i.test(normalized) || /^your-api-key$/i.test(normalized);
+}
+
+function isTemplateModel(value) {
+  const normalized = normalizeText(value);
+  return /^your-model-name$/i.test(normalized) || /^replace-with/i.test(normalized);
+}
+
+function normalizeComparableUrl(value) {
+  return normalizeText(value).replace(/\/+$/, "").toLowerCase();
 }
 
 export function getScreeningConfigResolution(workspaceRoot = getWorkspaceRoot()) {
@@ -119,10 +148,7 @@ export function readScreeningConfig(workspaceRoot = getWorkspaceRoot()) {
       baseUrl: normalizeText(resolution.parsed.baseUrl).replace(/\/+$/, ""),
       apiKey: normalizeText(resolution.parsed.apiKey),
       model: normalizeText(resolution.parsed.model),
-      debugPort: parsePositiveInteger(
-        process.env[ENV_DEBUG_PORT] || resolution.parsed.debugPort,
-        DEFAULT_DEBUG_PORT
-      ),
+      debugPort: resolveDefaultDebugPort(workspaceRoot),
       reasoningEffort: normalizeText(
         resolution.parsed.reasoningEffort
         || resolution.parsed.reasoning_effort
@@ -135,6 +161,14 @@ export function readScreeningConfig(workspaceRoot = getWorkspaceRoot()) {
     },
     ...resolution
   };
+}
+
+export function resolveDefaultDebugPort(workspaceRoot = getWorkspaceRoot()) {
+  const envPort = parsePositiveInteger(process.env[ENV_DEBUG_PORT], null);
+  if (envPort) return envPort;
+  const resolution = getScreeningConfigResolution(workspaceRoot);
+  const configPort = parsePositiveInteger(resolution.parsed?.debugPort, null);
+  return configPort || DEFAULT_DEBUG_PORT;
 }
 
 export function createScreeningConfigTemplate() {

@@ -12,6 +12,7 @@ import {
   toIsoNow,
   writeJsonFile
 } from "./utils.js";
+import { writeScreeningCsvReport } from "./liepin/screening-report.js";
 
 export function createRunId(kind = "run") {
   const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -37,7 +38,9 @@ export function getRunArtifactPaths(workspaceRoot, runId) {
     llmRequestPath: path.join(runDir, ARTIFACT_FILES.llmRequest),
     decisionPath: path.join(runDir, ARTIFACT_FILES.decision),
     coveragePath: path.join(runDir, ARTIFACT_FILES.coverage),
-    reasoningPath: path.join(runDir, ARTIFACT_FILES.reasoning)
+    reasoningPath: path.join(runDir, ARTIFACT_FILES.reasoning),
+    csvPath: path.join(runDir, ARTIFACT_FILES.csv),
+    checkpointPath: path.join(runDir, ARTIFACT_FILES.checkpoint)
   };
 }
 
@@ -216,37 +219,64 @@ export function markRunCompleted(workspaceRoot, runId, result = {}) {
   return next;
 }
 
-export function markRunFailed(workspaceRoot, runId, error) {
-  const next = updateRunState(workspaceRoot, runId, {
+export function markRunFailed(workspaceRoot, runId, error, { workflowResult = null } = {}) {
+  const normalizedWorkflowResult = normalizeWorkflowResultForTerminalState(workflowResult, RUN_STATES.FAILED);
+  const artifactSummary = normalizedWorkflowResult
+    ? persistRunWorkflowArtifacts(workspaceRoot, runId, normalizedWorkflowResult)
+    : null;
+  const patch = {
     state: RUN_STATES.FAILED,
     finished_at: toIsoNow(),
     stage: "failed",
     status_message: error?.message || "Run failed",
     error
-  });
+  };
+  if (artifactSummary) patch.artifact_summary = artifactSummary;
+  if (normalizedWorkflowResult) patch.result = normalizedWorkflowResult;
+  const next = updateRunState(workspaceRoot, runId, patch);
   if (next) appendRunEvent(next, "run_failed", error);
   return next;
 }
 
 export function markRunPaused(workspaceRoot, runId, result = null) {
-  const next = updateRunState(workspaceRoot, runId, {
+  const normalizedWorkflowResult = normalizeWorkflowResultForTerminalState(
+    isWorkflowResultLike(result) ? result : null,
+    RUN_STATES.PAUSED
+  );
+  const artifactSummary = normalizedWorkflowResult
+    ? persistRunWorkflowArtifacts(workspaceRoot, runId, normalizedWorkflowResult)
+    : null;
+  const patch = {
     state: RUN_STATES.PAUSED,
     stage: "paused",
     status_message: "Run paused",
     result: result || undefined
-  });
+  };
+  if (artifactSummary) patch.artifact_summary = artifactSummary;
+  if (normalizedWorkflowResult) patch.result = normalizedWorkflowResult;
+  const next = updateRunState(workspaceRoot, runId, patch);
   if (next) appendRunEvent(next, "run_paused", result || {});
   return next;
 }
 
 export function markRunCanceled(workspaceRoot, runId, result = null) {
-  const next = updateRunState(workspaceRoot, runId, {
+  const normalizedWorkflowResult = normalizeWorkflowResultForTerminalState(
+    isWorkflowResultLike(result) ? result : null,
+    RUN_STATES.CANCELED
+  );
+  const artifactSummary = normalizedWorkflowResult
+    ? persistRunWorkflowArtifacts(workspaceRoot, runId, normalizedWorkflowResult)
+    : null;
+  const patch = {
     state: RUN_STATES.CANCELED,
     finished_at: toIsoNow(),
     stage: "canceled",
     status_message: "Run canceled",
     result: result || undefined
-  });
+  };
+  if (artifactSummary) patch.artifact_summary = artifactSummary;
+  if (normalizedWorkflowResult) patch.result = normalizedWorkflowResult;
+  const next = updateRunState(workspaceRoot, runId, patch);
   if (next) appendRunEvent(next, "run_canceled", result || {});
   return next;
 }
@@ -287,16 +317,24 @@ export function buildRunStatusPayload(snapshot, { full = false } = {}) {
 
 export function persistRunWorkflowArtifacts(workspaceRoot, runId, workflowResult = {}) {
   const artifacts = getRunArtifactPaths(workspaceRoot, runId);
+  const currentSnapshot = readJsonFile(artifacts.runJsonPath, null);
   const payloads = buildWorkflowArtifactPayloads(workflowResult);
   writeJsonFile(artifacts.screenInputPath, payloads.screenInput);
   writeJsonFile(artifacts.llmRequestPath, payloads.llmRequest);
   writeJsonFile(artifacts.decisionPath, payloads.decision);
   writeJsonFile(artifacts.coveragePath, payloads.coverage);
+  const csvPath = writeScreeningCsvReport({
+    targetPath: artifacts.csvPath,
+    workflowResult,
+    input: currentSnapshot?.input || {}
+  });
   return {
     screenInputPath: artifacts.screenInputPath,
     llmRequestPath: artifacts.llmRequestPath,
     decisionPath: artifacts.decisionPath,
     coveragePath: artifacts.coveragePath,
+    csvPath,
+    checkpointPath: artifacts.checkpointPath,
     itemCount: payloads.itemCount,
     workflow: payloads.workflow
   };
@@ -318,7 +356,8 @@ export function buildWorkflowArtifactPayloads(workflowResult = {}) {
         rowKey: item.rowKey || item.chatState?.rowKey || item.candidate?.resumeId || "",
         candidateLabel: item.candidateLabel || item.candidate?.name || item.candidate?.label || item.beforeState?.rowText || item.rowText || "",
         textHash: item.textHash || item.candidate?.textHash || "",
-        manifest: item.manifest || item.chatInputManifest || item.recommendInputManifest || null,
+        manifest: item.manifest || item.inputManifest || item.chatInputManifest || item.recommendInputManifest || null,
+        inputManifest: item.inputManifest || null,
         recommendInputManifest: item.recommendInputManifest || null,
         chatInputManifest: item.chatInputManifest || null
       }))
@@ -331,7 +370,10 @@ export function buildWorkflowArtifactPayloads(workflowResult = {}) {
         rowKey: item.rowKey || item.chatState?.rowKey || item.candidate?.resumeId || "",
         llmRequest: item.llmRequest || null,
         recommendLlmRequest: item.recommendLlmRequest || null,
-        chatLlmRequest: item.chatLlmRequest || null
+        chatLlmRequest: item.chatLlmRequest || null,
+        reasoningCaptured: item.reasoningCaptured === true,
+        recommendReasoningCaptured: item.recommendReasoningCaptured === true,
+        chatReasoningCaptured: item.chatReasoningCaptured === true
       }))
     },
     decision: {
@@ -361,10 +403,52 @@ export function buildWorkflowArtifactPayloads(workflowResult = {}) {
       coverage: items.map((item) => ({
         index: item.index ?? item.rowIndex ?? null,
         rowKey: item.rowKey || item.chatState?.rowKey || item.candidate?.resumeId || "",
-        coverage: item.coverage || null,
+        coverage: item.coverage || item.payloadCoverage || null,
         recommendCoverage: item.recommendCoverage || null,
         missingRequiredSourceIds: item.missingRequiredSourceIds || item.chatInputManifest?.missingRequiredSourceIds || []
       }))
     }
   };
+}
+
+function isWorkflowResultLike(value) {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return false;
+  return Boolean(
+    value.workflow
+    || value.summary
+    || value.result
+    || value.schemaVersion
+    || value.items
+  );
+}
+
+function normalizeWorkflowResultForTerminalState(workflowResult, state) {
+  if (!isWorkflowResultLike(workflowResult)) return null;
+  const workflow = normalizeText(workflowResult.workflow || workflowResult.result?.workflow || "");
+  const result = normalizeResultPayload(workflowResult);
+  const summary = {
+    ...(workflowResult.summary && typeof workflowResult.summary === "object" ? workflowResult.summary : {})
+  };
+  if (!Object.hasOwn(summary, "ok")) {
+    summary.ok = state === RUN_STATES.COMPLETED;
+  }
+  if (!Object.hasOwn(summary, "terminalState")) {
+    summary.terminalState = state;
+  }
+  return {
+    workflow,
+    summary,
+    result
+  };
+}
+
+function normalizeResultPayload(workflowResult) {
+  if (workflowResult?.result && typeof workflowResult.result === "object") {
+    return workflowResult.result;
+  }
+  if (workflowResult && typeof workflowResult === "object") {
+    return workflowResult;
+  }
+  return {};
 }

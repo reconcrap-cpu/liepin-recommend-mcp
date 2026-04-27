@@ -20,10 +20,14 @@ const MODE_SCHEMAS = {
 export function buildScreeningLlmRequest({
   mode,
   screenInput,
-  config
+  config,
+  criteria = null,
+  operatorFilters = null
 }) {
   const schema = MODE_SCHEMAS[mode];
   if (!schema) throw new Error(`Unsupported screening mode: ${mode}`);
+  const normalizedCriteria = normalizeText(criteria) || null;
+  const normalizedFilters = normalizeText(operatorFilters) || null;
   return {
     provider: "openai_compatible",
     endpoint: "/chat/completions",
@@ -42,6 +46,7 @@ export function buildScreeningLlmRequest({
           "The decision field is an enum, not a sentence.",
           "Use decision=\"pass\" for accept/qualified/yes and decision=\"fail\" for reject/unqualified/no.",
           "Never use accept, reject, yes, no, or explanatory text as the decision value.",
+          "When operator_criteria is provided, treat it as mandatory screening guidance.",
           `Allowed post_action values: ${schema.postActions.join(", ")}.`
         ].join(" ")
       },
@@ -57,6 +62,8 @@ export function buildScreeningLlmRequest({
             decision: "pass",
             post_action: schema.postActions[0]
           },
+          operator_criteria: normalizedCriteria,
+          operator_filters: normalizedFilters,
           screen_input_schema: screenInput?.schemaVersion || null,
           manifest: screenInput?.manifest || null,
           candidate: screenInput?.candidate || null,
@@ -64,9 +71,6 @@ export function buildScreeningLlmRequest({
         })
       }
     ],
-    response_format: {
-      type: "json_object"
-    },
     temperature: 0
   };
 }
@@ -75,16 +79,26 @@ export async function runStructuredScreening({
   mode,
   screenInput,
   config,
+  criteria = null,
+  operatorFilters = null,
   provider = null,
   reasoningLogPath = null,
   fetchImpl = globalThis.fetch
 }) {
-  const request = buildScreeningLlmRequest({ mode, screenInput, config });
+  const request = buildScreeningLlmRequest({
+    mode,
+    screenInput,
+    config,
+    criteria,
+    operatorFilters
+  });
   let reasoningCaptured = false;
+  const reasoningFragments = [];
   const onReasoningDelta = (chunk) => {
     const text = String(chunk || "");
     if (!text) return;
     reasoningCaptured = true;
+    reasoningFragments.push(text);
     if (!reasoningLogPath) return;
     ensureDirSync(path.dirname(reasoningLogPath));
     fs.appendFileSync(reasoningLogPath, text, "utf8");
@@ -97,12 +111,22 @@ export async function runStructuredScreening({
     response = provider
       ? await provider({ request: currentRequest, onReasoningDelta })
       : await callOpenAiCompatibleJson({ config, request: currentRequest, fetchImpl });
+    const nativeReasoningText = extractNativeReasoningText(response);
+    if (nativeReasoningText) {
+      reasoningCaptured = true;
+      reasoningFragments.push(nativeReasoningText);
+      if (reasoningLogPath) {
+        ensureDirSync(path.dirname(reasoningLogPath));
+        fs.appendFileSync(reasoningLogPath, nativeReasoningText, "utf8");
+      }
+    }
     const content = extractResponseContent(response);
     try {
       return {
         request: currentRequest,
         decision: normalizeDecision(content, mode),
         reasoningCaptured,
+        reasoningText: dedupeStrings(reasoningFragments).join("\n"),
         rawResponse: response,
         schemaRepairAttempts: attempt
       };
@@ -147,7 +171,6 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
         body: JSON.stringify({
           model: config.model,
           messages: request.messages,
-          response_format: request.response_format,
           temperature: request.temperature
         }),
         signal: controller?.signal
@@ -177,14 +200,105 @@ function extractResponseContent(response) {
   if (typeof response === "string") return response;
   if (response?.content) return response.content;
   const messageContent = response?.choices?.[0]?.message?.content;
+  if (Array.isArray(messageContent)) {
+    return messageContent
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (typeof item?.text === "string") return item.text;
+        return "";
+      })
+      .join("\n");
+  }
   if (messageContent) return messageContent;
   return JSON.stringify(response || {});
 }
 
+function extractNativeReasoningText(response) {
+  const fragments = [];
+  collectNativeReasoning(response, fragments);
+  return dedupeStrings(fragments).join("\n");
+}
+
+function collectNativeReasoning(value, out = [], depth = 0, keyHint = "") {
+  if (depth > 6 || value === null || value === undefined) return out;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (isReasoningKey(keyHint)) {
+      const normalized = normalizeText(value);
+      if (normalized) out.push(normalized);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectNativeReasoning(item, out, depth + 1, keyHint);
+    }
+    return out;
+  }
+  if (typeof value !== "object") return out;
+
+  const type = normalizeText(value.type).toLowerCase();
+  if (type === "reasoning" || type === "reasoning_content") {
+    for (const key of ["text", "content", "summary", "summary_text"]) {
+      collectNestedText(value[key], out);
+    }
+  }
+
+  const directKeys = [
+    "reasoning",
+    "reasoning_content",
+    "reasoningContent",
+    "rawReasoningText",
+    "raw_reasoning_text"
+  ];
+  for (const key of directKeys) {
+    if (Object.hasOwn(value, key)) {
+      collectNestedText(value[key], out);
+    }
+  }
+
+  const choices = Array.isArray(value.choices) ? value.choices : [];
+  for (const choice of choices) {
+    collectNestedText(choice?.reasoning, out);
+    collectNestedText(choice?.reasoning_content, out);
+    collectNestedText(choice?.message?.reasoning, out);
+    collectNestedText(choice?.message?.reasoning_content, out);
+  }
+
+  const output = Array.isArray(value.output) ? value.output : [];
+  for (const item of output) {
+    const itemType = normalizeText(item?.type).toLowerCase();
+    if (itemType === "reasoning" || itemType === "reasoning_content") {
+      collectNestedText(item, out);
+    }
+  }
+  return out;
+}
+
+function collectNestedText(value, out = [], depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return out;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    const normalized = normalizeText(value);
+    if (normalized) out.push(normalized);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectNestedText(item, out, depth + 1);
+    return out;
+  }
+  if (typeof value === "object") {
+    for (const key of ["text", "content", "summary_text", "summary", "reasoning_content", "reasoning"]) {
+      if (Object.hasOwn(value, key)) collectNestedText(value[key], out, depth + 1);
+    }
+  }
+  return out;
+}
+
+function isReasoningKey(key) {
+  return /reasoning|reasoning_content|raw_reasoning|rawReasoning/u.test(String(key || ""));
+}
+
 function normalizeDecision(content, mode) {
-  const parsed = typeof content === "object" && content !== null
-    ? content
-    : JSON.parse(String(content || "{}"));
+  const parsed = parseJsonObjectContent(content);
   const decision = normalizeDecisionValue(parsed.decision);
   const postAction = normalizeText(parsed.post_action);
   if (!["pass", "fail"].includes(decision)) {
@@ -256,6 +370,96 @@ function normalizeFetchError(error, attempt, maxRetries) {
     return new Error(`LLM request timed out${attempt < maxRetries ? ", retrying" : ""}`);
   }
   return error;
+}
+
+function parseJsonObjectContent(content) {
+  if (content && typeof content === "object" && !Array.isArray(content)) {
+    return content;
+  }
+  const raw = String(content || "").trim();
+  if (!raw) {
+    throw new Error("LLM response is empty");
+  }
+  const candidates = [raw];
+  const fencedMatches = raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi);
+  for (const match of fencedMatches) {
+    const candidate = String(match?.[1] || "").trim();
+    if (candidate) candidates.push(candidate);
+  }
+  const extractedObject = extractFirstJsonObject(raw);
+  if (extractedObject) candidates.push(extractedObject);
+  for (const candidate of dedupeStrings(candidates)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Continue trying other candidates.
+    }
+  }
+  throw new Error(`LLM response is not valid JSON object: ${truncateText(raw, 200)}`);
+}
+
+function extractFirstJsonObject(text) {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (start < 0) {
+      if (char === "{") {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
+}
+
+function dedupeStrings(values) {
+  const seen = new Set();
+  const deduped = [];
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+  return deduped;
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 function parsePositiveInteger(value, fallback) {
