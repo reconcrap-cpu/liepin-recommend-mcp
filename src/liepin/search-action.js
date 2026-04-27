@@ -2,6 +2,10 @@ import { normalizeSnapshot } from "./snapshot.js";
 import { searchSelectors } from "./selectors.js";
 import { normalizeText, sha1, sleep } from "../utils.js";
 import {
+  COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+  isChatCardLimitModalText
+} from "./chat-card-limit.js";
+import {
   ensureSearchJobSelectorVisible,
   openSearchSelectedJobDropdown,
   readSearchJobDropdownState
@@ -702,9 +706,20 @@ export async function executeSearchChatAction(client, {
       click
     };
   }
-  const serviceVisible = await waitForSearchServiceJobModal(client);
-  if (!serviceVisible) {
-    const after = await readSearchChatButtonState(client);
+  const postClickOutcome = await waitForSearchChatActionOutcome(client);
+  if (postClickOutcome.type === "chat_card_limit") {
+    return {
+      ok: false,
+      status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+      quotaExhausted: true,
+      clicked: true,
+      before,
+      click,
+      chatCardLimitModal: postClickOutcome.chatCardLimitModal
+    };
+  }
+  if (postClickOutcome.type !== "service_job") {
+    const after = postClickOutcome.buttonState || await readSearchChatButtonState(client);
     if (isAlreadyContactedButtonText(after.text)) {
       return {
         ok: true,
@@ -781,6 +796,109 @@ export async function executeSearchChatAction(client, {
     confirm,
     modalClosed: Boolean(modalClosed),
     after
+  };
+}
+
+async function waitForSearchChatActionOutcome(client, {
+  timeoutMs = 8000,
+  pollMs = 250
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await readSearchChatActionOutcomeState(client);
+    if (latest.type !== "pending") return latest;
+    await sleep(pollMs);
+  }
+  return latest || {
+    type: "none",
+    serviceVisible: false,
+    buttonState: null,
+    chatCardLimitModal: null
+  };
+}
+
+async function readSearchChatActionOutcomeState(client) {
+  const state = await client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/gu, " ").trim();
+    const compact = (value) => normalize(value).replace(/\s+/gu, "");
+    const getText = (node) => normalize(node?.innerText || node?.textContent || "");
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const modalRoots = [...new Set([
+      ...document.querySelectorAll(".ant-lpt-modal-content"),
+      ...document.querySelectorAll(".ant-lpt-modal"),
+      ...document.querySelectorAll("[role='dialog']")
+    ])].filter(visible);
+    const chatCardLimitModal = modalRoots.find((node) => {
+      const text = compact(getText(node));
+      return text.includes("购买开聊卡")
+        && (
+          text.includes("资源不足")
+          || text.includes("猎币支付")
+          || text.includes("在线聊意向求职者")
+          || text.includes("免费索要联系方式")
+        );
+    }) || null;
+    if (chatCardLimitModal) {
+      const modalText = getText(chatCardLimitModal);
+      return {
+        type: "chat_card_limit",
+        chatCardLimitModal: {
+          present: true,
+          status: "communication_quota_exhausted",
+          reason: "buy_chat_card_modal",
+          title: getText(chatCardLimitModal.querySelector(".ant-lpt-modal-title, [class*='modal-title']")),
+          hasResourceInsufficientTip: compact(modalText).includes("资源不足"),
+          hasLiebiPayment: compact(modalText).includes("猎币支付") || compact(modalText).includes("猎币"),
+          modalText: modalText.slice(0, 1000)
+        }
+      };
+    }
+    const serviceContainer = document.querySelector(selectors.serviceJobContainer);
+    if (serviceContainer && visible(serviceContainer) && getText(serviceContainer).length > 0) {
+      return {
+        type: "service_job",
+        serviceVisible: true
+      };
+    }
+    const modalRoot = document.querySelector(selectors.modalRoot);
+    const button = modalRoot?.querySelector(selectors.openChatButton)
+      || document.querySelector(selectors.openChatButton);
+    return {
+      type: "pending",
+      serviceVisible: false,
+      buttonState: {
+        exists: Boolean(button),
+        text: getText(button),
+        className: String(button?.className || ""),
+        disabled: Boolean(button?.disabled || button?.getAttribute?.("aria-disabled") === "true")
+      }
+    };
+  }, searchSelectors);
+  if (state?.type === "chat_card_limit" && !isChatCardLimitModalText(state.chatCardLimitModal?.modalText || "")) {
+    return {
+      type: "pending",
+      serviceVisible: false,
+      buttonState: null,
+      chatCardLimitModal: null
+    };
+  }
+  if (state?.type === "pending" && isAlreadyContactedButtonText(state.buttonState?.text)) {
+    return {
+      ...state,
+      type: "already_contacted"
+    };
+  }
+  return state || {
+    type: "pending",
+    serviceVisible: false,
+    buttonState: null,
+    chatCardLimitModal: null
   };
 }
 

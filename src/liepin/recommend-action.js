@@ -8,6 +8,10 @@ import {
 import { DEFAULT_DEBUG_PORT, DEFAULT_RECOMMEND_STEP_DELAY_MS } from "../constants.js";
 import { normalizeText, sleep } from "../utils.js";
 import {
+  COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+  readChatCardLimitModal
+} from "./chat-card-limit.js";
+import {
   clearRecommendBlockingOverlaysToList,
   closeRecommendModalToList
 } from "./recommend-return.js";
@@ -339,6 +343,17 @@ export async function waitForRecommendChatEntryVerification({
     if (sourceTarget?.kind === "recommend") {
       const client = await createPageClient(sourceTarget);
       try {
+        const chatCardLimitModal = await readChatCardLimitModal(client);
+        if (chatCardLimitModal.present) {
+          return {
+            verified: false,
+            reason: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+            quotaExhausted: true,
+            entryKind: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+            chatCardLimitModal,
+            target: sourceTarget
+          };
+        }
         lastSnapshot = await readRecommendEmbeddedChatSnapshot(client, candidate);
         if (lastSnapshot.sentGreetingFound && !lastSnapshot.hasChatEntry) {
           await continueFromSentGreetingToBasicChat(client);

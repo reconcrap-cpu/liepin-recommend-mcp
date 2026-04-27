@@ -11,6 +11,7 @@ import {
 import { runStructuredScreening, SCREENING_MODES } from "../llm-adapter.js";
 import { normalizeText, sleep } from "../utils.js";
 import { auditCvPayloadCoverage, buildCvScreeningInput } from "./cv-payload.js";
+import { COMMUNICATION_QUOTA_EXHAUSTED_STATUS } from "./chat-card-limit.js";
 import { extractRecommendCandidateIdentity } from "./recommend-action.js";
 import {
   applySearchQuickProfile,
@@ -78,6 +79,8 @@ export async function runSearchChatChain({
     ?? items.filter((item) => ["search_contacted", "search_already_contacted"].includes(item.status)).length;
   let greetedCandidates = restoredCheckpoint?.greetedCandidates
     ?? countSearchGreetingSentItems(items);
+  let communicationQuotaExhausted = Boolean(restoredCheckpoint?.communicationQuotaExhausted);
+  let stopReason = restoredCheckpoint?.stopReason || "";
   let currentPageNumber = restoredCheckpoint?.currentPageNumber || 1;
   let pageCardIndex = restoredCheckpoint?.pageCardIndex ?? Math.max(0, startIndex || 0);
 
@@ -96,6 +99,8 @@ export async function runSearchChatChain({
     llmCalls,
     communicationClicks,
     alreadyContactedCandidates,
+    communicationQuotaExhausted,
+    stopReason,
     currentCandidateLabel: "",
     lastItem: null
   };
@@ -114,6 +119,8 @@ export async function runSearchChatChain({
       alreadyContactedCandidates,
       passedCandidates,
       greetedCandidates,
+      communicationQuotaExhausted,
+      stopReason,
       violations,
       items,
       stage,
@@ -196,7 +203,11 @@ export async function runSearchChatChain({
         scannedCandidates: items.length
       });
 
-      while ((requestedScanLimit === null || items.length < requestedScanLimit) && greetedCandidates < requestedCandidateLimit) {
+      while (
+        (requestedScanLimit === null || items.length < requestedScanLimit)
+        && greetedCandidates < requestedCandidateLimit
+        && !communicationQuotaExhausted
+      ) {
         await assertNotRiskPage(client, "搜索串联扫描中");
         await waitForSearchCards(client);
         const listState = await readSearchListState(client);
@@ -344,6 +355,27 @@ export async function runSearchChatChain({
           item.chatAction = await executeSearchChatAction(client, {
             jobTitle: requestedJobTitle
           });
+          if (item.chatAction.quotaExhausted || item.chatAction.status === COMMUNICATION_QUOTA_EXHAUSTED_STATUS) {
+            communicationQuotaExhausted = true;
+            stopReason = COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
+            item.status = COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
+            items.push(item);
+            finalizeItemProgress(item);
+            emitProgress(
+              COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+              "检测到购买开聊卡弹窗，沟通次数已达到上限，已停止猎聘搜索任务",
+              {
+                scannedCandidates: items.length,
+                passedCandidates,
+                greetedCandidates,
+                llmCalls,
+                communicationClicks,
+                alreadyContactedCandidates,
+                stopReason
+              }
+            );
+            break;
+          }
           if (item.chatAction.clicked) communicationClicks += 1;
           if (item.chatAction.status === "already_contacted") alreadyContactedCandidates += 1;
           if (item.chatAction.ok) {
@@ -400,6 +432,8 @@ export async function runSearchChatChain({
               alreadyContactedCandidates,
               passedCandidates,
               greetedCandidates,
+              communicationQuotaExhausted,
+              stopReason,
               seenTextHashes,
               violations,
               items
@@ -429,6 +463,8 @@ export async function runSearchChatChain({
         alreadyContactedCandidates,
         passedCandidates,
         greetedCandidates,
+        communicationQuotaExhausted,
+        stopReason: stopReason || (greetedCandidates >= requestedCandidateLimit ? "candidate_limit_reached" : "completed"),
         violations,
         items,
         jobPreparation,
@@ -476,10 +512,11 @@ export function evaluateSearchChatChain(result = {}) {
   const greetedCandidates = Number.isFinite(result.greetedCandidates)
     ? result.greetedCandidates
     : countSearchGreetingSentItems(items);
-  if (greetedCandidates < (result.requestedCandidateLimit || 0)) {
+  if (greetedCandidates < (result.requestedCandidateLimit || 0) && !result.communicationQuotaExhausted) {
     failures.push("not_enough_search_greetings");
   }
   for (const item of items) {
+    if (isCommunicationQuotaExhaustedItem(item)) continue;
     if (!item.llmCalled && item.status !== "duplicate_search_candidate") {
       failures.push(`candidate_${item.index}_llm_not_called`);
     }
@@ -518,6 +555,8 @@ export function summarizeSearchChatChain(result = {}) {
     communicationClicks: result.communicationClicks || 0,
     alreadyContactedCandidates: result.alreadyContactedCandidates || 0,
     actionClicks: result.actionClicks || 0,
+    communicationQuotaExhausted: Boolean(result.communicationQuotaExhausted),
+    stopReason: result.stopReason || "",
     violations: evaluation.failures
   };
 }
@@ -540,6 +579,8 @@ function buildSearchChatChainResult({
   alreadyContactedCandidates,
   passedCandidates,
   greetedCandidates,
+  communicationQuotaExhausted = false,
+  stopReason = "",
   violations,
   items,
   jobPreparation = null,
@@ -560,6 +601,8 @@ function buildSearchChatChainResult({
     communicationClicks,
     alreadyContactedCandidates,
     actionClicks: communicationClicks,
+    communicationQuotaExhausted: Boolean(communicationQuotaExhausted),
+    stopReason,
     profile: requestedProfile,
     jobTitle: requestedJobTitle,
     hideRead: Boolean(requestedHideRead),
@@ -598,6 +641,8 @@ function buildSearchChatChainProgressSnapshot(state = {}) {
     communicationClicks: state.communicationClicks || 0,
     alreadyContactedCandidates: state.alreadyContactedCandidates || 0,
     actionClicks: state.communicationClicks || 0,
+    communicationQuotaExhausted: Boolean(state.communicationQuotaExhausted),
+    stopReason: state.stopReason || "",
     currentCandidateLabel: state.currentCandidateLabel || "",
     lastItem: state.lastItem || null
   };
@@ -669,6 +714,8 @@ function normalizeSearchCheckpoint(checkpoint, {
     pageCardIndex: Math.max(0, Number.parseInt(String(checkpoint.pageCardIndex || 0), 10) || 0),
     items: Array.isArray(checkpoint.items) ? checkpoint.items : [],
     violations: Array.isArray(checkpoint.violations) ? checkpoint.violations : [],
+    communicationQuotaExhausted: Boolean(checkpoint.communicationQuotaExhausted),
+    stopReason: normalizeText(checkpoint.stopReason) || "",
     seenTextHashes: Array.isArray(checkpoint.seenTextHashes) ? checkpoint.seenTextHashes : []
   };
 }
@@ -689,6 +736,8 @@ function buildSearchCheckpoint({
   alreadyContactedCandidates,
   passedCandidates,
   greetedCandidates,
+  communicationQuotaExhausted = false,
+  stopReason = "",
   seenTextHashes,
   violations,
   items
@@ -711,6 +760,8 @@ function buildSearchCheckpoint({
     alreadyContactedCandidates,
     passedCandidates,
     greetedCandidates,
+    communicationQuotaExhausted: Boolean(communicationQuotaExhausted),
+    stopReason: normalizeText(stopReason),
     seenTextHashes: [...seenTextHashes],
     violations: [...violations],
     items: [...items]
@@ -764,6 +815,12 @@ function isSearchGreetingSentItem(item = {}) {
     && item.chatAction?.ok
     && item.chatAction?.clicked
     && item.chatAction?.status === "search_contacted";
+}
+
+function isCommunicationQuotaExhaustedItem(item = {}) {
+  return item.status === COMMUNICATION_QUOTA_EXHAUSTED_STATUS
+    || item.chatAction?.quotaExhausted
+    || item.chatAction?.status === COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
 }
 
 async function assertNotRiskPage(client, actionLabel) {

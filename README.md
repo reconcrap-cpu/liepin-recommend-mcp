@@ -25,7 +25,7 @@ liepin-mcp skill export --format markdown
 liepin-mcp external-agent config
 liepin-mcp research discover --debug-port 9222
 liepin-mcp recommend start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
-liepin-mcp chat start --candidate-limit 5 --job "全部职位" --unread-only false --criteria "聊天筛选条件"
+liepin-mcp chat start --candidate-limit all --job "全部职位" --unread-only false --criteria "聊天筛选条件"
 liepin-mcp search start --profile "测试" --job "招聘实习生" --hide-read true --candidate-limit 5 --criteria "搜索筛选条件"
 liepin-mcp recommend-chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
 liepin-mcp runs progress --kind chat --include-completed false
@@ -36,6 +36,8 @@ Doctor/start preflight will automatically handle fixable environment issues: ins
 `recommend/chat/recommend-chat start` now default to production behavior:
 - real recommend chat clicks are enabled by default,
 - real request-resume clicks are enabled by default.
+
+For chat start, `--candidate-limit` accepts a positive integer or all-candidates expressions such as `all`, `全部`, `所有`, and `扫到底`; all-candidates mode scans until the chat list bottom/platform limit.
 
 Use `--execute-request-resume false` or a dry-run workflow when you need no-side-effect validation.
 

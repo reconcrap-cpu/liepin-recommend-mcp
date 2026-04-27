@@ -102,6 +102,28 @@ test("summarizeChatScreening reports candidate_limit as target successes", () =>
   assert.equal(summary.ok, true);
 });
 
+test("summarizeChatScreening reports all-candidates target as null", () => {
+  const summary = summarizeChatScreening({
+    passed: true,
+    jobTitle: "全部职位",
+    unreadOnly: true,
+    requestedCandidateLimit: null,
+    scanAllCandidates: true,
+    requestResumeSuccesses: 3,
+    processedCandidates: 8,
+    screenableCandidates: 4,
+    skippedRows: 4,
+    llmCalls: 4,
+    actionClicks: 3,
+    stopReason: "list_bottom_reached",
+    violations: []
+  });
+
+  assert.equal(summary.targetRequestResumeSuccesses, null);
+  assert.equal(summary.requestResumeSuccesses, 3);
+  assert.equal(summary.ok, true);
+});
+
 test("resolveChatScreeningScrollStopReason stops when chat list reaches bottom", () => {
   assert.equal(resolveChatScreeningScrollStopReason({
     latestSnapshot: { atBottom: true, maxContactsVisible: false },

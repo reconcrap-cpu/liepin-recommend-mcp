@@ -49,7 +49,7 @@ import {
   runSearchChatChain,
   summarizeSearchChatChain
 } from "./liepin/search-chat-chain.js";
-import { normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
+import { isAllCandidateLimit, normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
 
 export async function runWorker({
   workspaceRoot = getWorkspaceRoot(),
@@ -253,7 +253,9 @@ export async function executeWorkflow({
   if (workflow === RUN_WORKFLOWS.CHAT_SCREENING) {
     const llm = resolveChatScreeningLlm(workspaceRoot, input);
     const result = await executors.chatScreening({ port }, {
-      candidateLimit: parsePositiveInteger(input.candidate_limit, null),
+      candidateLimit: Object.hasOwn(input, "candidate_limit")
+        ? parseChatCandidateLimitInput(input.candidate_limit)
+        : undefined,
       scanLimit: parsePositiveInteger(input.scan_limit, null),
       jobTitle: normalizeText(input.job || input.job_title) || null,
       unreadOnly: parseBooleanInput(input.unread_only, null),
@@ -521,6 +523,12 @@ function parseBooleanInput(value, fallback = null) {
   if (["true", "1", "yes", "on"].includes(normalized)) return true;
   if (["false", "0", "no", "off"].includes(normalized)) return false;
   return fallback;
+}
+
+function parseChatCandidateLimitInput(value) {
+  if (value === null || isAllCandidateLimit(value)) return null;
+  const parsed = parsePositiveInteger(value, null);
+  return parsed || undefined;
 }
 
 function createRunControlInterruptError({

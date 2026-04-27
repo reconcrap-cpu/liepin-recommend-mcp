@@ -43,6 +43,8 @@ description: "Use when users want chat-only screening on Liepin chat page via @r
 - `unread_only`（是否只扫“未读”：true/false）
 - `criteria`（开放式筛选条件，自然语言）
 
+`candidate_limit` 可以是正整数，也可以是全量扫描表达。用户说 `all`、`全部`、`所有`、`扫到底`、`扫完`、`扫完所有人选`、`扫描全部候选人`、`直到列表底部` 等意思时，传给 `liepin_chat_start` 的 `candidate_limit` 使用 `"all"` 或用户原词，表示扫完所有可见候选人直到列表底部/平台上限；不要再要求用户改成具体整数。
+
 可选但建议确认：
 
 - `scan_limit`

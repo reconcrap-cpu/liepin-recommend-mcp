@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+  isChatCardLimitModalText
+} from "./chat-card-limit.js";
+import {
   executeSearchChatAction,
   isAlreadyContactedButtonText,
   isImmediateChatButtonText,
@@ -15,6 +19,11 @@ test("search chat button text helpers distinguish immediate and already-contacte
   assert.equal(isImmediateChatButtonText("继续沟通"), false);
   assert.equal(isAlreadyContactedButtonText("继续沟通"), true);
   assert.equal(isAlreadyContactedButtonText("立即沟通"), false);
+});
+
+test("chat card limit modal text is recognized as communication quota exhausted", () => {
+  assert.equal(isChatCardLimitModalText("购买开聊卡 资源不足 猎币支付"), true);
+  assert.equal(isChatCardLimitModalText("请选择开聊职位 确认"), false);
 });
 
 test("service job row selector supports the current modal div structure", () => {
@@ -91,10 +100,13 @@ test("accepts direct contacted state when service job modal is skipped", async (
       className: "xpath-open-im-btn"
     },
     {
-      exists: true,
-      text: "继续沟通",
-      className: "xpath-open-im-btn",
-      disabled: false
+      type: "pending",
+      buttonState: {
+        exists: true,
+        text: "继续沟通",
+        className: "xpath-open-im-btn",
+        disabled: false
+      }
     }
   ];
   const client = {
@@ -114,4 +126,43 @@ test("accepts direct contacted state when service job modal is skipped", async (
   assert.equal(action.status, "search_contacted");
   assert.equal(action.selectedJob, null);
   assert.equal(action.after.text, "继续沟通");
+});
+
+test("returns quota exhausted when buy chat card modal appears after immediate chat click", async () => {
+  const evaluations = [
+    {
+      exists: true,
+      text: "立即沟通",
+      className: "xpath-open-im-btn",
+      disabled: false
+    },
+    {
+      clicked: true,
+      text: "立即沟通",
+      className: "xpath-open-im-btn"
+    },
+    {
+      type: "chat_card_limit",
+      chatCardLimitModal: {
+        present: true,
+        status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+        reason: "buy_chat_card_modal",
+        modalText: "购买开聊卡 资源不足 猎币支付"
+      }
+    }
+  ];
+  const client = {
+    async evaluate() {
+      return evaluations.shift();
+    }
+  };
+
+  const action = await executeSearchChatAction(client, {
+    jobTitle: "科研算法工程师"
+  });
+
+  assert.equal(action.ok, false);
+  assert.equal(action.status, COMMUNICATION_QUOTA_EXHAUSTED_STATUS);
+  assert.equal(action.quotaExhausted, true);
+  assert.equal(action.clicked, true);
 });

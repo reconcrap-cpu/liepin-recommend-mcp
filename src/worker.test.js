@@ -239,6 +239,53 @@ test("runWorker executes chat screening workflow with required chat inputs", asy
   });
 });
 
+test("runWorker passes all-candidates chat limit through as unlimited", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.CHAT,
+      phase: "P31",
+      input: {
+        workflow: RUN_WORKFLOWS.CHAT_SCREENING,
+        mock_llm: true,
+        candidate_limit: "扫到底",
+        job: "全部职位",
+        unread_only: false,
+        criteria: "筛选条件"
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        chatScreening: async (_browser, options) => {
+          assert.equal(options.candidateLimit, null);
+          return {
+            passed: true,
+            requestedCandidateLimit: null,
+            scanAllCandidates: true,
+            requestResumeSuccesses: 1,
+            processedCandidates: 3,
+            screenableCandidates: 2,
+            skippedRows: 1,
+            llmCalls: 2,
+            actionClicks: 1,
+            stopReason: "list_bottom_reached",
+            violations: [],
+            items: []
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.result.summary.targetRequestResumeSuccesses, null);
+  });
+});
+
 test("runWorker pauses search only at safe checkpoint point", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
   await withRuntimeHome(workspaceRoot, async () => {

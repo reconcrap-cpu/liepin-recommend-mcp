@@ -7,6 +7,7 @@ import {
   shouldExecuteSearchChat,
   summarizeSearchChatChain
 } from "./search-chat-chain.js";
+import { COMMUNICATION_QUOTA_EXHAUSTED_STATUS } from "./chat-card-limit.js";
 
 test("shouldExecuteSearchChat requires pass and chat post action", () => {
   assert.equal(shouldExecuteSearchChat({ decision: "pass", post_action: "chat" }), true);
@@ -72,4 +73,40 @@ test("evaluateSearchChatChain fails when target is not reached", () => {
 
   assert.equal(evaluation.passed, false);
   assert.equal(evaluation.failures.includes("not_enough_search_greetings"), true);
+});
+
+test("evaluateSearchChatChain treats chat card limit as a terminal stop", () => {
+  const result = {
+    schemaVersion: SEARCH_CHAT_CHAIN_SCHEMA_VERSION,
+    profile: "测试",
+    jobTitle: "招聘实习生",
+    requestedCandidateLimit: 2,
+    passedCandidates: 0,
+    greetedCandidates: 0,
+    communicationQuotaExhausted: true,
+    stopReason: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+    violations: [],
+    items: [
+      {
+        index: 0,
+        llmCalled: true,
+        decision: { decision: "pass", post_action: "chat" },
+        chatAction: {
+          ok: false,
+          clicked: true,
+          status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+          quotaExhausted: true
+        },
+        status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS
+      }
+    ]
+  };
+
+  const evaluation = evaluateSearchChatChain(result);
+  assert.equal(evaluation.passed, true);
+  assert.deepEqual(evaluation.failures, []);
+
+  const summary = summarizeSearchChatChain({ ...result, passed: true });
+  assert.equal(summary.communicationQuotaExhausted, true);
+  assert.equal(summary.stopReason, COMMUNICATION_QUOTA_EXHAUSTED_STATUS);
 });

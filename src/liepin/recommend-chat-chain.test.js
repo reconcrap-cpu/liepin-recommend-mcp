@@ -10,6 +10,7 @@ import {
   inferRecommendBasicChatResumeState,
   summarizeRecommendChatChain
 } from "./recommend-chat-chain.js";
+import { COMMUNICATION_QUOTA_EXHAUSTED_STATUS } from "./chat-card-limit.js";
 
 test("inferRecommendBasicChatResumeState recognizes P14 chat states from same-page modal", () => {
   assert.equal(inferRecommendBasicChatResumeState({
@@ -153,6 +154,8 @@ test("summarizeRecommendChatChain reports P22 chain counters", () => {
     requestResumeClicks: 0,
     actionClicks: 5,
     executeRequestResume: false,
+    communicationQuotaExhausted: false,
+    stopReason: "",
     violations: []
   });
 });
@@ -184,4 +187,47 @@ test("evaluateRecommendChatChain accepts verified chat_page entry kind", () => {
 
   assert.equal(evaluation.passed, true);
   assert.deepEqual(evaluation.failures, []);
+});
+
+test("evaluateRecommendChatChain treats chat card limit as a terminal stop", () => {
+  const result = {
+    requestedCandidateLimit: 2,
+    chainedCandidates: 0,
+    passedCandidates: 0,
+    samePageChatEntries: 0,
+    chatPageEntries: 0,
+    executeRequestResume: false,
+    communicationQuotaExhausted: true,
+    stopReason: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+    violations: [],
+    items: [
+      {
+        index: 0,
+        recommendLlmCalled: true,
+        recommendDecision: { decision: "pass", post_action: "chat" },
+        recommendChatAction: { clicked: true },
+        chatVerification: {
+          verified: false,
+          quotaExhausted: true,
+          reason: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+          entryKind: COMMUNICATION_QUOTA_EXHAUSTED_STATUS
+        },
+        chatAction: {
+          action: "none",
+          clicked: false,
+          status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+          quotaExhausted: true
+        },
+        status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS
+      }
+    ]
+  };
+
+  const evaluation = evaluateRecommendChatChain(result);
+  assert.equal(evaluation.passed, true);
+  assert.deepEqual(evaluation.failures, []);
+
+  const summary = summarizeRecommendChatChain({ ...result, passed: true });
+  assert.equal(summary.communicationQuotaExhausted, true);
+  assert.equal(summary.stopReason, COMMUNICATION_QUOTA_EXHAUSTED_STATUS);
 });

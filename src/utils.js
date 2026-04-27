@@ -42,6 +42,58 @@ export function parsePositiveInteger(value, fallback = null) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+export function isAllCandidateLimit(value) {
+  if (value === undefined || value === null || typeof value === "boolean") return false;
+  const normalized = normalizeText(value).toLowerCase();
+  if (!normalized) return false;
+  const compact = normalized.replace(/[\s_\-.,，。、:：;；!！?？'"`“”‘’()（）[\]【】]+/gu, "");
+  if (!compact) return false;
+
+  const exactAliases = new Set([
+    "all",
+    "全部",
+    "所有",
+    "全量",
+    "不限",
+    "不限制",
+    "无限",
+    "無限",
+    "扫到底",
+    "掃到底",
+    "扫完",
+    "掃完",
+    "到底"
+  ]);
+  if (exactAliases.has(compact)) return true;
+
+  return [
+    "allcandidates",
+    "everyone",
+    "scanall",
+    "scanuntilbottom",
+    "scanthroughall",
+    "全部人选",
+    "全部候选人",
+    "所有人选",
+    "所有候选人",
+    "扫完全部",
+    "扫完所有",
+    "扫描全部",
+    "扫描所有",
+    "扫到列表底部",
+    "扫到最后",
+    "直到列表底部",
+    "一直扫到",
+    "掃完全部",
+    "掃完所有"
+  ].some((alias) => compact.includes(alias));
+}
+
+export function parseCandidateLimit(value, fallback = null) {
+  if (isAllCandidateLimit(value)) return null;
+  return parsePositiveInteger(value, fallback);
+}
+
 export async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
