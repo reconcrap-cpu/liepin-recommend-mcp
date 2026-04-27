@@ -349,6 +349,95 @@ export async function applySearchQuickProfile(client, {
   };
 }
 
+export async function setSearchHideReadFilter(client, {
+  hideRead = false
+} = {}) {
+  const target = Boolean(hideRead);
+  const before = await readSearchHideReadFilterState(client);
+  if (!before.found) {
+    throw new Error("搜索页未找到“隐藏已查看”checkbox：input[name=\"filterRead\"]");
+  }
+  const beforeList = await readSearchListState(client);
+  const click = before.checked === target
+    ? { clicked: false, reason: "already_matches" }
+    : await clickSearchHideReadFilter(client);
+  const after = await waitForSearchHideReadFilterState(client, target);
+  if (!isSearchHideReadStateVerified(after, target)) {
+    throw new Error(`搜索页“隐藏已查看”checkbox 状态确认失败：期望 ${target ? "勾选" : "取消勾选"}，实际 ${after.checked ? "勾选" : "取消勾选"}`);
+  }
+  const afterList = click.clicked
+    ? await waitForSearchListRefresh(client, beforeList, { timeoutMs: 8000 })
+    : await readSearchListState(client);
+  return {
+    target,
+    before,
+    click,
+    after,
+    afterList,
+    verified: true
+  };
+}
+
+export async function readSearchHideReadFilterState(client) {
+  return client.evaluate((selectors) => {
+    const input = document.querySelector(selectors.hideReadCheckboxInput);
+    const checkbox = input?.closest(".ant-lpt-checkbox") || null;
+    const wrapper = input?.closest("label") || checkbox;
+    return {
+      found: Boolean(input),
+      checked: Boolean(input?.checked),
+      value: input?.value ?? null,
+      className: String(checkbox?.className || ""),
+      wrapperText: (wrapper?.innerText || wrapper?.textContent || "").replace(/\s+/g, " ").trim()
+    };
+  }, searchSelectors);
+}
+
+export function isSearchHideReadStateVerified(state = {}, expected = false) {
+  if (!state.found) return false;
+  const target = Boolean(expected);
+  if (Boolean(state.checked) !== target) return false;
+  const className = String(state.className || "");
+  if (target) {
+    return state.value === "1" && className.includes("ant-lpt-checkbox-checked");
+  }
+  return state.value === "" && !className.includes("ant-lpt-checkbox-checked");
+}
+
+async function clickSearchHideReadFilter(client) {
+  return client.evaluate((selectors) => {
+    const input = document.querySelector(selectors.hideReadCheckboxInput);
+    if (!input) {
+      return {
+        clicked: false,
+        reason: "filter_read_not_found"
+      };
+    }
+    input.click();
+    const checkbox = input.closest(".ant-lpt-checkbox");
+    return {
+      clicked: true,
+      checked: Boolean(input.checked),
+      value: input.value,
+      className: String(checkbox?.className || "")
+    };
+  }, searchSelectors);
+}
+
+async function waitForSearchHideReadFilterState(client, target, {
+  timeoutMs = 4000,
+  pollMs = 200
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = await readSearchHideReadFilterState(client);
+  while (Date.now() < deadline) {
+    if (isSearchHideReadStateVerified(latest, target)) return latest;
+    await sleep(pollMs);
+    latest = await readSearchHideReadFilterState(client);
+  }
+  return latest;
+}
+
 export async function waitForSearchListRefresh(client, before = {}, {
   timeoutMs = 12000
 } = {}) {

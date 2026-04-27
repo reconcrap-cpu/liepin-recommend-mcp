@@ -122,6 +122,7 @@ test("runWorker executes search chat-chain workflow with injected executor", asy
         mock_llm: true,
         profile: "测试",
         job: "招聘实习生",
+        hide_read: true,
         candidate_limit: 1
       }
     });
@@ -133,10 +134,13 @@ test("runWorker executes search chat-chain workflow with injected executor", asy
         searchChatChain: async (_browser, options) => {
           assert.equal(options.profile, "测试");
           assert.equal(options.jobTitle, "招聘实习生");
+          assert.equal(options.hideRead, true);
           return {
             passed: true,
             profile: "测试",
             jobTitle: "招聘实习生",
+            hideRead: true,
+            hideReadFilter: { verified: true },
             requestedCandidateLimit: 1,
             scannedCandidates: 1,
             passedCandidates: 1,

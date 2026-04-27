@@ -35,11 +35,13 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
   - 启动前必须调用 `liepin_search_options`。
   - 必须把返回的所有 `profiles[].title` 列出来让用户选择 `profile`。
   - 必须把返回的所有 `jobs[].title` 列出来让用户选择 `job`。
+  - 必须询问 `hide_read`（是否隐藏已查看），用户必须明确选择 true 或 false。
   - 不要自己编造 profile 或 job；只能用 `liepin_search_options` 返回的值，或用户明确给出的可匹配简称。
 
 - **参数确认强制**
   - `profile`：快捷搜索 profile。
   - `job`：用于搜索页职位选择与“请选择开聊职位”弹窗。
+  - `hide_read`：是否勾选搜索页“隐藏已查看”。true=勾选；false=取消勾选。
   - `candidate_limit`：目标通过并完成沟通的人数，不是扫描人数。
   - `criteria`：AI 简历筛选标准，自然语言，必须由用户给出。
   - `scan_limit` 默认不要传；不传表示不限制扫描上限，只受目标通过人数或最后一页限制。只有用户明确要求限制扫描人数时才传。
@@ -60,6 +62,7 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 - 连接猎聘搜索页。
 - 选择用户指定职位，并确保职位下拉中的 checkbox 全部 unticked。
 - 点击用户指定快捷搜索 profile。
+- 按 `hide_read` 确认“隐藏已查看”checkbox 状态，确认正确后才开始扫描候选人。
 - 逐个打开搜索结果候选人详情 modal。
 - 抽取完整简历，交给 LLM 根据 `criteria` 判断。
 - 若 LLM 返回 `pass + chat`，点击“立即沟通”，选择用户指定岗位并确认。
@@ -73,6 +76,7 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
   "debug_port": 9223,
   "profile": "测试",
   "job": "招聘实习生",
+  "hide_read": true,
   "candidate_limit": 3,
   "criteria": "必须有 HR 实习经验",
   "allow_chat_action": true

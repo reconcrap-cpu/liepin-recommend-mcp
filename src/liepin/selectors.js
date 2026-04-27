@@ -61,6 +61,7 @@ export const searchSelectors = {
   selectedJobDropdown: ".search-page-select-jobs-dropdown",
   selectedJobDropdownOpen: ".search-page-select-jobs-dropdown:not(.ant-lpt-dropdown-hidden)",
   searchJobInput: ".searchJobCompanyBox--TnpGe .wrap--IS4Du .job-input, .searchJobCompanyBox--TnpGe .wrap--IS4Du .ant-lpt-select",
+  hideReadCheckboxInput: 'input[name="filterRead"].ant-lpt-checkbox-input',
   quickSearchRoot: ".filterContentBox--FSZIQ > div:nth-child(1)",
   quickProfileTag: ".saved-condition-tag-root",
   quickProfileTitle: 'span[class*="tagTitle--"], [class*="tagTitle--"]',

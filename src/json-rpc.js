@@ -194,7 +194,7 @@ function createTools() {
       name: TOOL_NAMES.searchOptions,
       description: [
         "List available Liepin search-page quick search profiles and job choices for the operator.",
-        "Call this before asking the user for liepin_search_start `profile` and `job`.",
+        "Call this before asking the user for liepin_search_start `profile`, `job`, and `hide_read`.",
         "The tool also reports checked job conditions in the selected-job dropdown so operators can verify the search workflow will clear them before scanning."
       ].join(" "),
       inputSchema: {
@@ -363,6 +363,10 @@ function createStartTool(name, kind) {
           description: "Liepin job title. For search start, call liepin_search_options first and pass one of its jobs."
         },
         job_title: { type: "string" },
+        hide_read: {
+          type: "boolean",
+          description: "Whether to check the search page 隐藏已查看 checkbox before scanning."
+        },
         criteria: { type: "string" },
         recommend_criteria: { type: "string" },
         chat_criteria: { type: "string" },
@@ -568,10 +572,11 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         status: "OK",
         summary: summarizeSearchOptions(discovery),
         searchUsage: {
-          requiredStartArgs: ["profile", "job", "criteria", "candidate_limit"],
+          requiredStartArgs: ["profile", "job", "hide_read", "criteria", "candidate_limit"],
           profileSource: "profiles[].title",
           jobSource: "jobs[].title",
-          note: "search_start 会先选择 job 并清空职位下拉里的 checked 条件，再点击 profile 开始扫描。"
+          hideReadMeaning: "true=勾选隐藏已查看，false=取消隐藏已查看",
+          note: "search_start 会先选择 job 并清空职位下拉里的 checked 条件，再点击 profile，确认隐藏已查看 checkbox 后开始扫描。"
         },
         profiles: discovery.profiles,
         jobs: discovery.jobs,
@@ -875,7 +880,7 @@ function requiredStartArgsForKind(kind) {
     return ["candidate_limit", "filter", "recommend_criteria", "chat_criteria"];
   }
   if (kind === RUN_KINDS.SEARCH) {
-    return ["profile", "job", "criteria", "candidate_limit"];
+    return ["profile", "job", "hide_read", "criteria", "candidate_limit"];
   }
   return [];
 }
@@ -989,6 +994,7 @@ function buildStartInput(kind, args = {}, defaultDebugPort = DEFAULT_DEBUG_PORT)
       workflow: args.workflow || RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
       profile: args.profile || args.search_profile || null,
       job: args.job || args.job_title || null,
+      hide_read: requireBooleanArg(args, "hide_read"),
       candidate_limit: args.candidate_limit || args.sample_limit || 5,
       scan_limit: args.scan_limit || null,
       start_index: args.start_index || 0,

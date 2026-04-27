@@ -322,6 +322,7 @@ export async function executeWorkflow({
       scanLimit: parsePositiveInteger(input.scan_limit, null),
       profile: normalizeText(input.profile || input.search_profile) || null,
       jobTitle: normalizeText(input.job || input.job_title) || null,
+      hideRead: parseBooleanInput(input.hide_read, false),
       startIndex: parseNonNegativeInteger(input.start_index, 0),
       stepDelayMs: parsePositiveInteger(input.step_delay_ms, DEFAULT_RECOMMEND_STEP_DELAY_MS),
       maxPayloadChars: parsePositiveInteger(input.max_chars, null),

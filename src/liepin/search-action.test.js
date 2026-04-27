@@ -5,6 +5,7 @@ import {
   executeSearchChatAction,
   isAlreadyContactedButtonText,
   isImmediateChatButtonText,
+  isSearchHideReadStateVerified,
   waitForSearchServiceJobSelection
 } from "./search-action.js";
 import { searchSelectors } from "./selectors.js";
@@ -20,6 +21,28 @@ test("service job row selector supports the current modal div structure", () => 
   assert.equal(searchSelectors.serviceJobContainer, '[id^="serviceJobListContainer"]');
   assert.equal(searchSelectors.serviceJobRow.includes('> div > div > div'), true);
   assert.equal(searchSelectors.serviceJobRow.includes('[class*="jobListWrap"] li'), true);
+});
+
+test("search hide-read checkbox verification matches Liepin checked DOM", () => {
+  assert.equal(searchSelectors.hideReadCheckboxInput, 'input[name="filterRead"].ant-lpt-checkbox-input');
+  assert.equal(isSearchHideReadStateVerified({
+    found: true,
+    checked: true,
+    value: "1",
+    className: "ant-lpt-checkbox ant-lpt-checkbox-checked"
+  }, true), true);
+  assert.equal(isSearchHideReadStateVerified({
+    found: true,
+    checked: false,
+    value: "",
+    className: "ant-lpt-checkbox"
+  }, false), true);
+  assert.equal(isSearchHideReadStateVerified({
+    found: true,
+    checked: true,
+    value: "1",
+    className: "ant-lpt-checkbox ant-lpt-checkbox-checked"
+  }, false), false);
 });
 
 test("waits for service job options before treating the chat job as missing", async () => {

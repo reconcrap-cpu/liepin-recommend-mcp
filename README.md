@@ -26,6 +26,7 @@ liepin-mcp external-agent config
 liepin-mcp research discover --debug-port 9222
 liepin-mcp recommend start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
 liepin-mcp chat start --candidate-limit 5 --job "全部职位" --unread-only false --criteria "聊天筛选条件"
+liepin-mcp search start --profile "测试" --job "招聘实习生" --hide-read true --candidate-limit 5 --criteria "搜索筛选条件"
 liepin-mcp recommend-chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
 liepin-mcp runs progress --kind chat --include-completed false
 ```

@@ -54,7 +54,8 @@ test("tools/list exposes liepin-prefixed tools", async () => {
   const searchTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.searchStart);
   assert.equal(searchTool.inputSchema.properties.profile.type, "string");
   assert.equal(searchTool.inputSchema.properties.job.type, "string");
-  assert.deepEqual(searchTool.inputSchema.required, ["profile", "job", "criteria", "candidate_limit"]);
+  assert.equal(searchTool.inputSchema.properties.hide_read.type, "boolean");
+  assert.deepEqual(searchTool.inputSchema.required, ["profile", "job", "hide_read", "criteria", "candidate_limit"]);
   const chatTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.chatStart);
   assert.equal(chatTool.inputSchema.properties.unread_only.type, "boolean");
   assert.deepEqual(chatTool.inputSchema.required, ["candidate_limit", "job", "unread_only", "criteria"]);
@@ -346,6 +347,7 @@ test("search start defaults to search chat chain over JSON-RPC", async () => {
         mock_llm: true,
         profile: "测试",
         job: "招聘实习生",
+        hide_read: false,
         candidate_limit: 1
       }
     }
@@ -370,6 +372,7 @@ test("search start validates and canonicalizes page option names before acceptin
         arguments: {
           profile: "杭州 算法",
           job: "科研算法工程师(大模型与 aigc 方向)",
+          hide_read: true,
           criteria: "筛选条件",
           candidate_limit: 1
         }
@@ -393,6 +396,7 @@ test("search start validates and canonicalizes page option names before acceptin
     const snapshot = readRunState(workspaceRoot, payload.run_id);
     assert.equal(snapshot.input.profile, "杭州算法");
     assert.equal(snapshot.input.job, "科研算法工程师（大模型与AIGC方向）");
+    assert.equal(snapshot.input.hide_read, true);
   } finally {
     if (previous === undefined) {
       delete process.env[ENV_HOME];
@@ -413,6 +417,7 @@ test("search start rejects unmatched page option names before queueing", async (
       arguments: {
         profile: "杭州算法",
         job: "不存在的职位",
+        hide_read: true,
         criteria: "筛选条件",
         candidate_limit: 1
       }
@@ -445,6 +450,7 @@ test("search start rejects when chat action is not allowed", async () => {
         mock_llm: true,
         profile: "测试",
         job: "招聘实习生",
+        hide_read: false,
         candidate_limit: 1,
         allow_chat_action: false
       }
@@ -467,6 +473,7 @@ test("start tools run target-page doctor preflight before accepting", async () =
         mock_llm: true,
         profile: "测试",
         job: "招聘实习生",
+        hide_read: false,
         candidate_limit: 1
       }
     }

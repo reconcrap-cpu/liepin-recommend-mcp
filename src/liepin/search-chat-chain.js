@@ -22,6 +22,7 @@ import {
   readSearchListState,
   readSearchModalSnapshot,
   readSearchPaginationState,
+  setSearchHideReadFilter,
   waitForSearchCards
 } from "./search-action.js";
 
@@ -35,6 +36,7 @@ export async function runSearchChatChain({
   scanLimit = null,
   profile = null,
   jobTitle = null,
+  hideRead = false,
   startIndex = 0,
   stepDelayMs = DEFAULT_RECOMMEND_STEP_DELAY_MS,
   maxPayloadChars = null,
@@ -49,6 +51,7 @@ export async function runSearchChatChain({
 } = {}) {
   const requestedProfile = normalizeText(profile);
   const requestedJobTitle = normalizeText(jobTitle);
+  const requestedHideRead = Boolean(hideRead);
   if (!requestedProfile) throw new Error("search_chat_chain 需要 profile，请先调用 liepin_search_options 让用户选择。");
   if (!requestedJobTitle) throw new Error("search_chat_chain 需要 job，请先调用 liepin_search_options 让用户选择开聊职位。");
 
@@ -58,7 +61,8 @@ export async function runSearchChatChain({
     : null;
   const restoredCheckpoint = normalizeSearchCheckpoint(checkpoint, {
     profile: requestedProfile,
-    jobTitle: requestedJobTitle
+    jobTitle: requestedJobTitle,
+    hideRead: requestedHideRead
   });
   const items = restoredCheckpoint?.items ? [...restoredCheckpoint.items] : [];
   const seenTextHashes = new Set([
@@ -72,6 +76,8 @@ export async function runSearchChatChain({
     ?? items.filter((item) => item.status === "search_already_contacted").length;
   let passedCandidates = restoredCheckpoint?.passedCandidates
     ?? items.filter((item) => ["search_contacted", "search_already_contacted"].includes(item.status)).length;
+  let greetedCandidates = restoredCheckpoint?.greetedCandidates
+    ?? countSearchGreetingSentItems(items);
   let currentPageNumber = restoredCheckpoint?.currentPageNumber || 1;
   let pageCardIndex = restoredCheckpoint?.pageCardIndex ?? Math.max(0, startIndex || 0);
 
@@ -80,11 +86,13 @@ export async function runSearchChatChain({
     scanLimit: requestedScanLimit,
     profile: requestedProfile,
     jobTitle: requestedJobTitle,
+    hideRead: requestedHideRead,
     currentScan: null,
     currentPageNumber,
     currentCardIndex: null,
     scannedCandidates: items.length,
     passedCandidates,
+    greetedCandidates,
     llmCalls,
     communicationClicks,
     alreadyContactedCandidates,
@@ -97,6 +105,7 @@ export async function runSearchChatChain({
       requestedScanLimit,
       requestedProfile,
       requestedJobTitle,
+      requestedHideRead,
       startIndex,
       stepDelayMs,
       maxPayloadChars,
@@ -104,6 +113,7 @@ export async function runSearchChatChain({
       communicationClicks,
       alreadyContactedCandidates,
       passedCandidates,
+      greetedCandidates,
       violations,
       items,
       stage,
@@ -139,7 +149,7 @@ export async function runSearchChatChain({
   try {
     try {
       await assertNotRiskPage(client, "搜索串联");
-      emitProgress("prepare_search_page", `已连接搜索页，准备 profile=${requestedProfile} job=${requestedJobTitle}`);
+      emitProgress("prepare_search_page", `已连接搜索页，准备 profile=${requestedProfile} job=${requestedJobTitle} hide_read=${requestedHideRead}`);
       const jobPreparation = await prepareSearchJobSelection(client, {
         jobTitle: requestedJobTitle
       });
@@ -153,6 +163,16 @@ export async function runSearchChatChain({
       const profileAction = await applySearchQuickProfile(client, {
         profile: requestedProfile
       });
+      const hideReadFilter = await setSearchHideReadFilter(client, {
+        hideRead: requestedHideRead
+      });
+      emitProgress(
+        "search_hide_read_filter_confirmed",
+        `已确认搜索页“隐藏已查看”：${requestedHideRead ? "已勾选" : "未勾选"}`,
+        {
+          scannedCandidates: items.length
+        }
+      );
       await waitForSearchCards(client);
       if (restoredCheckpoint) {
         const restoredPosition = await restoreSearchCheckpointPosition(client, {
@@ -164,6 +184,7 @@ export async function runSearchChatChain({
         emitProgress("search_checkpoint_restored", `已恢复搜索 checkpoint：第 ${currentPageNumber} 页第 ${pageCardIndex + 1} 张卡片`, {
           scannedCandidates: items.length,
           passedCandidates,
+          greetedCandidates,
           llmCalls,
           communicationClicks,
           alreadyContactedCandidates,
@@ -175,7 +196,7 @@ export async function runSearchChatChain({
         scannedCandidates: items.length
       });
 
-      while ((requestedScanLimit === null || items.length < requestedScanLimit) && passedCandidates < requestedCandidateLimit) {
+      while ((requestedScanLimit === null || items.length < requestedScanLimit) && greetedCandidates < requestedCandidateLimit) {
         await assertNotRiskPage(client, "搜索串联扫描中");
         await waitForSearchCards(client);
         const listState = await readSearchListState(client);
@@ -187,6 +208,7 @@ export async function runSearchChatChain({
               code: "search_reached_last_page_before_target",
               scannedCandidates: items.length,
               passedCandidates,
+              greetedCandidates,
               requestedCandidateLimit
             });
             break;
@@ -326,6 +348,9 @@ export async function runSearchChatChain({
           if (item.chatAction.status === "already_contacted") alreadyContactedCandidates += 1;
           if (item.chatAction.ok) {
             passedCandidates += 1;
+            if (item.chatAction.clicked && item.chatAction.status === "search_contacted") {
+              greetedCandidates += 1;
+            }
             item.status = item.chatAction.status === "already_contacted"
               ? "search_already_contacted"
               : "search_contacted";
@@ -364,6 +389,7 @@ export async function runSearchChatChain({
               requestedScanLimit,
               requestedProfile,
               requestedJobTitle,
+              requestedHideRead,
               startIndex,
               stepDelayMs,
               maxPayloadChars,
@@ -373,6 +399,7 @@ export async function runSearchChatChain({
               communicationClicks,
               alreadyContactedCandidates,
               passedCandidates,
+              greetedCandidates,
               seenTextHashes,
               violations,
               items
@@ -393,6 +420,7 @@ export async function runSearchChatChain({
         requestedScanLimit,
         requestedProfile,
         requestedJobTitle,
+        requestedHideRead,
         startIndex,
         stepDelayMs,
         maxPayloadChars,
@@ -400,10 +428,12 @@ export async function runSearchChatChain({
         communicationClicks,
         alreadyContactedCandidates,
         passedCandidates,
+        greetedCandidates,
         violations,
         items,
         jobPreparation,
-        profileAction
+        profileAction,
+        hideReadFilter
       });
       return {
         ...result,
@@ -423,6 +453,7 @@ export async function runSearchChatChain({
     emitProgress("candidate_completed", `搜索候选人已完成：${buildCandidateProgressLabel(item.candidate) || item.index + 1} -> ${item.status}`, {
       scannedCandidates: items.length,
       passedCandidates,
+      greetedCandidates,
       llmCalls,
       communicationClicks,
       alreadyContactedCandidates,
@@ -442,8 +473,11 @@ export function evaluateSearchChatChain(result = {}) {
   }
   if (!normalizeText(result.profile)) failures.push("missing_search_profile");
   if (!normalizeText(result.jobTitle)) failures.push("missing_job_title");
-  if ((result.passedCandidates || 0) < (result.requestedCandidateLimit || 0)) {
-    failures.push("not_enough_passed_candidates");
+  const greetedCandidates = Number.isFinite(result.greetedCandidates)
+    ? result.greetedCandidates
+    : countSearchGreetingSentItems(items);
+  if (greetedCandidates < (result.requestedCandidateLimit || 0)) {
+    failures.push("not_enough_search_greetings");
   }
   for (const item of items) {
     if (!item.llmCalled && item.status !== "duplicate_search_candidate") {
@@ -474,9 +508,12 @@ export function summarizeSearchChatChain(result = {}) {
     ok: Boolean(result.passed),
     profile: result.profile || "",
     jobTitle: result.jobTitle || "",
+    hideRead: Boolean(result.hideRead),
+    hideReadVerified: Boolean(result.hideReadFilter?.verified),
     requestedCandidateLimit: result.requestedCandidateLimit || 0,
     scannedCandidates: result.scannedCandidates || 0,
     passedCandidates: result.passedCandidates || 0,
+    greetedCandidates: result.greetedCandidates ?? countSearchGreetingSentItems(result.items || []),
     llmCalls: result.llmCalls || 0,
     communicationClicks: result.communicationClicks || 0,
     alreadyContactedCandidates: result.alreadyContactedCandidates || 0,
@@ -494,6 +531,7 @@ function buildSearchChatChainResult({
   requestedScanLimit,
   requestedProfile,
   requestedJobTitle,
+  requestedHideRead,
   startIndex,
   stepDelayMs,
   maxPayloadChars,
@@ -501,10 +539,12 @@ function buildSearchChatChainResult({
   communicationClicks,
   alreadyContactedCandidates,
   passedCandidates,
+  greetedCandidates,
   violations,
   items,
   jobPreparation = null,
   profileAction = null,
+  hideReadFilter = null,
   stage = null,
   statusMessage = null,
   passed = null
@@ -515,12 +555,14 @@ function buildSearchChatChainResult({
     scanLimit: requestedScanLimit,
     scannedCandidates: items.length,
     passedCandidates,
+    greetedCandidates,
     llmCalls,
     communicationClicks,
     alreadyContactedCandidates,
     actionClicks: communicationClicks,
     profile: requestedProfile,
     jobTitle: requestedJobTitle,
+    hideRead: Boolean(requestedHideRead),
     startIndex,
     stepDelayMs,
     maxPayloadChars,
@@ -528,6 +570,7 @@ function buildSearchChatChainResult({
     statusMessage,
     jobPreparation,
     profileAction,
+    hideReadFilter,
     violations: [...violations],
     items: [...items],
     passed
@@ -536,18 +579,21 @@ function buildSearchChatChainResult({
 
 function buildSearchChatChainProgressSnapshot(state = {}) {
   const targetCandidates = Math.max(1, state.targetCandidates || 1);
+  const greetedCandidates = state.greetedCandidates || 0;
   return {
     workflow: RUN_WORKFLOWS.SEARCH_CHAT_CHAIN,
     targetCandidates,
     scanLimit: state.scanLimit === null ? null : Math.max(targetCandidates, state.scanLimit || targetCandidates),
     currentScan: Number.isInteger(state.currentScan) && state.currentScan > 0 ? state.currentScan : null,
-    currentTarget: Math.min((state.passedCandidates || 0) + 1, targetCandidates),
+    currentTarget: Math.min(greetedCandidates + 1, targetCandidates),
     currentPageNumber: state.currentPageNumber || null,
     currentCardIndex: Number.isInteger(state.currentCardIndex) ? state.currentCardIndex : null,
     profile: state.profile || "",
     jobTitle: state.jobTitle || "",
+    hideRead: Boolean(state.hideRead),
     scannedCandidates: state.scannedCandidates || 0,
     passedCandidates: state.passedCandidates || 0,
+    greetedCandidates,
     llmCalls: state.llmCalls || 0,
     communicationClicks: state.communicationClicks || 0,
     alreadyContactedCandidates: state.alreadyContactedCandidates || 0,
@@ -601,7 +647,8 @@ function buildSearchOperatorFilter({
 
 function normalizeSearchCheckpoint(checkpoint, {
   profile,
-  jobTitle
+  jobTitle,
+  hideRead = false
 } = {}) {
   if (!checkpoint || typeof checkpoint !== "object") return null;
   if (checkpoint.schemaVersion !== SEARCH_CHAT_CHAIN_CHECKPOINT_SCHEMA_VERSION) return null;
@@ -612,6 +659,9 @@ function normalizeSearchCheckpoint(checkpoint, {
   }
   if (checkpointJobTitle && checkpointJobTitle !== normalizeText(jobTitle)) {
     throw new Error(`搜索 checkpoint job 不匹配：${checkpointJobTitle} != ${normalizeText(jobTitle)}`);
+  }
+  if (typeof checkpoint.hideRead === "boolean" && checkpoint.hideRead !== Boolean(hideRead)) {
+    throw new Error(`搜索 checkpoint hide_read 不匹配：${checkpoint.hideRead} != ${Boolean(hideRead)}`);
   }
   return {
     ...checkpoint,
@@ -628,6 +678,7 @@ function buildSearchCheckpoint({
   requestedScanLimit,
   requestedProfile,
   requestedJobTitle,
+  requestedHideRead,
   startIndex,
   stepDelayMs,
   maxPayloadChars,
@@ -637,6 +688,7 @@ function buildSearchCheckpoint({
   communicationClicks,
   alreadyContactedCandidates,
   passedCandidates,
+  greetedCandidates,
   seenTextHashes,
   violations,
   items
@@ -646,6 +698,7 @@ function buildSearchCheckpoint({
     updatedAt: new Date().toISOString(),
     profile: requestedProfile,
     jobTitle: requestedJobTitle,
+    hideRead: Boolean(requestedHideRead),
     requestedCandidateLimit,
     requestedScanLimit,
     startIndex,
@@ -657,6 +710,7 @@ function buildSearchCheckpoint({
     communicationClicks,
     alreadyContactedCandidates,
     passedCandidates,
+    greetedCandidates,
     seenTextHashes: [...seenTextHashes],
     violations: [...violations],
     items: [...items]
@@ -699,6 +753,17 @@ function parsePageNumber(value, fallback) {
 
 function dedupeStrings(values) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function countSearchGreetingSentItems(items = []) {
+  return items.filter((item) => isSearchGreetingSentItem(item)).length;
+}
+
+function isSearchGreetingSentItem(item = {}) {
+  return item.status === "search_contacted"
+    && item.chatAction?.ok
+    && item.chatAction?.clicked
+    && item.chatAction?.status === "search_contacted";
 }
 
 async function assertNotRiskPage(client, actionLabel) {
