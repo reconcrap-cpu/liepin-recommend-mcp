@@ -144,7 +144,7 @@ export async function activateAndReadChatRow(client, index) {
     const rows = [...document.querySelectorAll(selectors.conversationRow)];
     const clickedRow = rows[selectors.index] || null;
     const activeRow = rows.find((node) => node.classList.contains("active")) || null;
-    const row = activeRow || clickedRow || rows[0];
+    const row = clickedRow || activeRow || rows[0];
     if (!row) return null;
     const getText = (node) => (node?.innerText || "").replace(/\s+/g, " ").trim();
     const getTitleOrText = (node) => (node?.getAttribute("title") || getText(node)).replace(/\s+/g, " ").trim();

@@ -139,14 +139,32 @@ test("resolveChatScreeningScrollStopReason stops when chat list reaches bottom",
 test("resolveChatScreeningScrollStopReason keeps terminal signals ahead of bottom and idle", () => {
   assert.equal(resolveChatScreeningScrollStopReason({
     latestSnapshot: { atBottom: true, maxContactsVisible: true },
-    idleScrollPasses: 2
+    idleScrollPasses: 2,
+    noNewRowsPasses: 2
   }), "max_contacts_reached");
 
   assert.equal(resolveChatScreeningScrollStopReason({
     latestSnapshot: { atBottom: false, maxContactsVisible: false },
     scroll: { atBottom: false, maxContactsVisible: false },
-    idleScrollPasses: 2
+    idleScrollPasses: 2,
+    noNewRowsPasses: 2
   }), "no_scroll_progress");
+});
+
+test("resolveChatScreeningScrollStopReason stops after repeated full passes with no new rows", () => {
+  assert.equal(resolveChatScreeningScrollStopReason({
+    latestSnapshot: { atBottom: false, maxContactsVisible: false },
+    scroll: { atBottom: false, moved: true, maxContactsVisible: false },
+    idleScrollPasses: 0,
+    noNewRowsPasses: 1
+  }), "");
+
+  assert.equal(resolveChatScreeningScrollStopReason({
+    latestSnapshot: { atBottom: false, maxContactsVisible: false },
+    scroll: { atBottom: false, moved: true, maxContactsVisible: false },
+    idleScrollPasses: 0,
+    noNewRowsPasses: 2
+  }), "no_new_rows_after_full_pass");
 });
 
 function createRequestResumeFakeClient(states) {

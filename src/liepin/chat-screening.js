@@ -146,6 +146,7 @@ export async function runChatScreening({
       });
 
       let idleScrollPasses = 0;
+      let noNewRowsPasses = 0;
       while (scanAllCandidates || requestResumeSuccesses < requestedCandidateLimit) {
         if (requestedScanLimit && processedCandidates >= requestedScanLimit) {
           stopReason = "scan_limit_reached";
@@ -260,6 +261,7 @@ export async function runChatScreening({
             }
             restartedAfterRefresh = true;
             idleScrollPasses = 0;
+            noNewRowsPasses = 0;
             emitProgress("candidate_completed", `页面刷新后跳过当前候选人并继续：${state.rowKey}`, {
               observedRows,
               processedCandidates,
@@ -420,6 +422,7 @@ export async function runChatScreening({
             }
             restartedAfterRefresh = true;
             idleScrollPasses = 0;
+            noNewRowsPasses = 0;
             break;
           }
         }
@@ -438,9 +441,15 @@ export async function runChatScreening({
           stopReason = "scan_limit_reached";
           break;
         }
+        if (newRowsThisWindow === 0 && seenRows.size > 0) {
+          noNewRowsPasses += 1;
+        } else {
+          noNewRowsPasses = 0;
+        }
         const latestSnapshot = await readChatListSnapshot(client);
         const preScrollStopReason = resolveChatScreeningScrollStopReason({
-          latestSnapshot
+          latestSnapshot,
+          noNewRowsPasses
         });
         if (preScrollStopReason) {
           stopReason = preScrollStopReason;
@@ -456,7 +465,8 @@ export async function runChatScreening({
         }
         const scrollStopReason = resolveChatScreeningScrollStopReason({
           scroll,
-          idleScrollPasses
+          idleScrollPasses,
+          noNewRowsPasses
         });
         if (scrollStopReason) {
           stopReason = scrollStopReason;
@@ -525,7 +535,8 @@ export function summarizeChatScreening(result = {}) {
 export function resolveChatScreeningScrollStopReason({
   latestSnapshot = null,
   scroll = null,
-  idleScrollPasses = 0
+  idleScrollPasses = 0,
+  noNewRowsPasses = 0
 } = {}) {
   if (latestSnapshot?.maxContactsVisible || scroll?.maxContactsVisible) {
     return "max_contacts_reached";
@@ -535,6 +546,9 @@ export function resolveChatScreeningScrollStopReason({
   }
   if (idleScrollPasses >= 2) {
     return "no_scroll_progress";
+  }
+  if (noNewRowsPasses >= 2) {
+    return "no_new_rows_after_full_pass";
   }
   return "";
 }
