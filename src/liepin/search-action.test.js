@@ -5,6 +5,7 @@ import {
   COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
   isChatCardLimitModalText
 } from "./chat-card-limit.js";
+import { isSentGreetingUpsellModalText } from "./sent-greeting-upsell.js";
 import {
   executeSearchChatAction,
   isAlreadyContactedButtonText,
@@ -24,6 +25,11 @@ test("search chat button text helpers distinguish immediate and already-contacte
 test("chat card limit modal text is recognized as communication quota exhausted", () => {
   assert.equal(isChatCardLimitModalText("购买开聊卡 资源不足 猎币支付"), true);
   assert.equal(isChatCardLimitModalText("请选择开聊职位 确认"), false);
+});
+
+test("sent greeting upsell modal text is recognized as benign close-and-continue modal", () => {
+  assert.equal(isSentGreetingUpsellModalText("已向候选人发送消息 更快获取人选回复 免费发起 关闭"), true);
+  assert.equal(isSentGreetingUpsellModalText("已向候选人发送消息 购买开聊卡 资源不足"), false);
 });
 
 test("service job row selector supports the current modal div structure", () => {
@@ -165,4 +171,69 @@ test("returns quota exhausted when buy chat card modal appears after immediate c
   assert.equal(action.status, COMMUNICATION_QUOTA_EXHAUSTED_STATUS);
   assert.equal(action.quotaExhausted, true);
   assert.equal(action.clicked, true);
+});
+
+test("closes sent greeting upsell after search greeting and counts the greeting", async () => {
+  const modalText = "已向候选人发送消息 更快获取人选回复 试试新权益 超级聊聊权益 免费发起 关闭";
+  const evaluations = [
+    {
+      exists: true,
+      text: "立即沟通",
+      className: "xpath-open-im-btn",
+      disabled: false
+    },
+    {
+      clicked: true,
+      text: "立即沟通",
+      className: "xpath-open-im-btn"
+    },
+    {
+      type: "sent_greeting_upsell",
+      sentGreetingUpsellModal: {
+        present: true,
+        status: "sent_greeting_upsell_modal",
+        reason: "sent_greeting_upsell_modal",
+        modalText
+      }
+    },
+    {
+      present: true,
+      status: "sent_greeting_upsell_modal",
+      reason: "sent_greeting_upsell_modal",
+      modalText
+    },
+    {
+      clicked: true,
+      text: "关闭",
+      closeMethod: "button_text"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    },
+    {
+      exists: true,
+      text: "继续沟通",
+      className: "xpath-open-im-btn",
+      disabled: false
+    }
+  ];
+  const client = {
+    async evaluate() {
+      if (evaluations.length === 0) throw new Error("Unexpected evaluate call");
+      return evaluations.shift();
+    }
+  };
+
+  const action = await executeSearchChatAction(client, {
+    jobTitle: "科研算法工程师"
+  });
+
+  assert.equal(action.ok, true);
+  assert.equal(action.status, "search_contacted");
+  assert.equal(action.clicked, true);
+  assert.equal(action.modalClosed, true);
+  assert.equal(action.sentGreetingUpsellModal.clicked, true);
+  assert.equal(evaluations.length, 0);
 });

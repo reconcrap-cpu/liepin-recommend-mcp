@@ -6,6 +6,10 @@ import {
   isChatCardLimitModalText
 } from "./chat-card-limit.js";
 import {
+  closeSentGreetingUpsellModal,
+  isSentGreetingUpsellModalText
+} from "./sent-greeting-upsell.js";
+import {
   ensureSearchJobSelectorVisible,
   openSearchSelectedJobDropdown,
   readSearchJobDropdownState
@@ -718,6 +722,25 @@ export async function executeSearchChatAction(client, {
       chatCardLimitModal: postClickOutcome.chatCardLimitModal
     };
   }
+  if (postClickOutcome.type === "sent_greeting_upsell") {
+    const sentGreetingUpsellModal = await closeSentGreetingUpsellModal(client);
+    const after = await waitForSearchChatButtonState(client, {
+      timeoutMs: 5000
+    });
+    const ok = Boolean(sentGreetingUpsellModal.closed && isAlreadyContactedButtonText(after.text));
+    return {
+      ok,
+      status: ok ? "search_contacted" : "sent_greeting_upsell_not_closed",
+      clicked: true,
+      before,
+      click,
+      selectedJob: null,
+      confirm: null,
+      modalClosed: Boolean(sentGreetingUpsellModal.closed),
+      sentGreetingUpsellModal,
+      after
+    };
+  }
   if (postClickOutcome.type !== "service_job") {
     const after = postClickOutcome.buttonState || await readSearchChatButtonState(client);
     if (isAlreadyContactedButtonText(after.text)) {
@@ -782,10 +805,18 @@ export async function executeSearchChatAction(client, {
     timeoutMs: 8000,
     pollMs: 250
   });
-  const after = await waitForSearchChatButtonState(client, {
+  const sentGreetingUpsellModal = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: 2500
+  });
+  const finalAfter = await waitForSearchChatButtonState(client, {
     timeoutMs: 8000
   });
-  const ok = Boolean(confirm.clicked && modalClosed && isAlreadyContactedButtonText(after.text));
+  const ok = Boolean(
+    confirm.clicked
+      && modalClosed
+      && sentGreetingUpsellModal.closed
+      && isAlreadyContactedButtonText(finalAfter.text)
+  );
   return {
     ok,
     status: ok ? "search_contacted" : "search_contact_state_not_verified",
@@ -795,7 +826,8 @@ export async function executeSearchChatAction(client, {
     selectedJob,
     confirm,
     modalClosed: Boolean(modalClosed),
-    after
+    sentGreetingUpsellModal: sentGreetingUpsellModal.present ? sentGreetingUpsellModal : null,
+    after: finalAfter
   };
 }
 
@@ -832,6 +864,9 @@ async function readSearchChatActionOutcomeState(client) {
     const modalRoots = [...new Set([
       ...document.querySelectorAll(".ant-lpt-modal-content"),
       ...document.querySelectorAll(".ant-lpt-modal"),
+      ...document.querySelectorAll(".ant-im-modal-content"),
+      ...document.querySelectorAll(".ant-im-modal"),
+      ...document.querySelectorAll(".ant-im-modal-wrap"),
       ...document.querySelectorAll("[role='dialog']")
     ])].filter(visible);
     const chatCardLimitModal = modalRoots.find((node) => {
@@ -855,6 +890,34 @@ async function readSearchChatActionOutcomeState(client) {
           title: getText(chatCardLimitModal.querySelector(".ant-lpt-modal-title, [class*='modal-title']")),
           hasResourceInsufficientTip: compact(modalText).includes("资源不足"),
           hasLiebiPayment: compact(modalText).includes("猎币支付") || compact(modalText).includes("猎币"),
+          modalText: modalText.slice(0, 1000)
+        }
+      };
+    }
+    const sentGreetingUpsellModal = modalRoots.find((node) => {
+      const text = compact(getText(node));
+      return text.includes("已向候选人发送消息")
+        && (
+          text.includes("更快获取人选回复")
+          || text.includes("超级聊聊权益")
+          || text.includes("加急通道触达")
+          || text.includes("免费发起")
+        );
+    }) || null;
+    if (sentGreetingUpsellModal) {
+      const modalText = getText(sentGreetingUpsellModal);
+      const buttons = [...sentGreetingUpsellModal.querySelectorAll("button")]
+        .filter(visible)
+        .map((node) => getText(node) || node.getAttribute("aria-label") || "")
+        .filter(Boolean);
+      return {
+        type: "sent_greeting_upsell",
+        sentGreetingUpsellModal: {
+          present: true,
+          status: "sent_greeting_upsell_modal",
+          reason: "sent_greeting_upsell_modal",
+          title: getText(sentGreetingUpsellModal.querySelector(".ant-im-modal-title, [class*='modal-title']")),
+          buttonTexts: buttons,
           modalText: modalText.slice(0, 1000)
         }
       };
@@ -886,6 +949,14 @@ async function readSearchChatActionOutcomeState(client) {
       serviceVisible: false,
       buttonState: null,
       chatCardLimitModal: null
+    };
+  }
+  if (state?.type === "sent_greeting_upsell" && !isSentGreetingUpsellModalText(state.sentGreetingUpsellModal?.modalText || "")) {
+    return {
+      type: "pending",
+      serviceVisible: false,
+      buttonState: null,
+      sentGreetingUpsellModal: null
     };
   }
   if (state?.type === "pending" && isAlreadyContactedButtonText(state.buttonState?.text)) {
