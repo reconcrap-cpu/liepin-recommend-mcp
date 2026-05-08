@@ -1236,7 +1236,15 @@ export async function confirmSearchServiceJobModal(client) {
 
 export async function closeSearchModalToList(client) {
   await closeSearchServiceJobModalIfOpen(client);
-  const before = await client.evaluate((selectors) => Boolean(document.querySelector(selectors.modalRoot)), searchSelectors);
+  const before = await client.evaluate((selectors) => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    return [...document.querySelectorAll(selectors.modalRoot)].some(visible);
+  }, searchSelectors);
   if (!before) {
     return {
       closed: true,
@@ -1244,7 +1252,16 @@ export async function closeSearchModalToList(client) {
     };
   }
   const click = await client.evaluate((selectors) => {
-    const button = document.querySelector(selectors.modalCloseButton);
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const roots = [...document.querySelectorAll(selectors.modalRoot)].filter(visible);
+    const root = roots[roots.length - 1] || document.querySelector(selectors.modalRoot);
+    const button = root?.querySelector("[class*='closeBtn'] [class*='antlpticon-close'], [class*='closeBtn'], .ant-lpt-modal-close, [aria-label='Close']")
+      || document.querySelector(selectors.modalCloseButton);
     if (!button) {
       return {
         clicked: false,
@@ -1258,25 +1275,29 @@ export async function closeSearchModalToList(client) {
       className: String(button.className || "")
     };
   }, searchSelectors);
-  const closed = await client.waitFor((selector) => {
-    const node = document.querySelector(selector);
-    if (!node) return true;
-    const style = window.getComputedStyle(node);
-    const rect = node.getBoundingClientRect();
-    return style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0;
-  }, [searchSelectors.modalRoot], {
+  const closed = await client.waitFor((selectors) => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    return ![...document.querySelectorAll(selectors.modalRoot)].some(visible);
+  }, [searchSelectors], {
     timeoutMs: 7000,
     pollMs: 250
   });
   if (!closed) {
     await pressSearchEscapeKey(client);
-    const closedByEscape = await client.waitFor((selector) => {
-      const node = document.querySelector(selector);
-      if (!node) return true;
-      const style = window.getComputedStyle(node);
-      const rect = node.getBoundingClientRect();
-      return style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0;
-    }, [searchSelectors.modalRoot], {
+    const closedByEscape = await client.waitFor((selectors) => {
+      const visible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      return ![...document.querySelectorAll(selectors.modalRoot)].some(visible);
+    }, [searchSelectors], {
       timeoutMs: 3000,
       pollMs: 250
     });
@@ -1360,35 +1381,66 @@ async function closeSearchServiceJobModalIfOpen(client) {
 export async function readSearchPaginationState(client) {
   return client.evaluate((selectors) => {
     const getText = (node) => (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
-    const pagebar = document.querySelector(selectors.pagebar);
-    const next = document.querySelector(selectors.nextPageButton);
-    const disabledNext = document.querySelector(selectors.disabledNextPageButton);
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const uniqueNodes = (nodes) => [...new Set(nodes.filter(Boolean))];
+    const exactPagebars = [...document.querySelectorAll(selectors.pagebar)];
+    const fallbackPagebars = [...document.querySelectorAll(".xpath-resume-list-box ul.ant-lpt-pagination, ul.ant-lpt-pagination")];
+    const pagebars = uniqueNodes([...exactPagebars, ...fallbackPagebars]);
+    const pagebar = pagebars.find(visible) || pagebars[0] || null;
+    const nextCandidates = pagebar
+      ? [...pagebar.querySelectorAll("li.ant-lpt-pagination-next")]
+      : [...document.querySelectorAll(selectors.nextPageButton)];
+    const next = nextCandidates.find(visible) || nextCandidates[0] || null;
     const items = [...(pagebar?.querySelectorAll("li") || [])].map((node, index) => ({
       index,
       text: getText(node),
       className: String(node.className || ""),
       ariaDisabled: node.getAttribute("aria-disabled") || "",
+      visible: visible(node),
       active: String(node.className || "").includes("active")
     }));
-    const active = items.find((item) => item.active) || null;
+    const active = items.find((item) => item.active && item.visible) || items.find((item) => item.active) || null;
     return {
       exists: Boolean(pagebar),
+      pagebarVisible: Boolean(pagebar && visible(pagebar)),
+      pagebarClassName: String(pagebar?.className || ""),
       activePageText: active?.text || "",
       items,
       nextExists: Boolean(next),
       nextDisabled: Boolean(
-        disabledNext
-        || next?.getAttribute("aria-disabled") === "true"
+        next?.getAttribute("aria-disabled") === "true"
         || String(next?.className || "").includes("disabled")
+        || next?.querySelector("button")?.disabled
       ),
       nextClassName: String(next?.className || ""),
-      nextAriaDisabled: next?.getAttribute("aria-disabled") || ""
+      nextAriaDisabled: next?.getAttribute("aria-disabled") || "",
+      nextVisible: Boolean(next && visible(next)),
+      pagebarCount: pagebars.length
     };
   }, searchSelectors);
 }
 
+export async function waitForSearchPaginationState(client, {
+  timeoutMs = 5000,
+  pollMs = 250
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await readSearchPaginationState(client);
+    if (latest.pagebarVisible && latest.nextExists) return latest;
+    await sleep(pollMs);
+  }
+  return latest || readSearchPaginationState(client);
+}
+
 export async function clickSearchNextPage(client) {
-  const before = await readSearchPaginationState(client);
+  const before = await waitForSearchPaginationState(client);
   const beforeList = await readSearchListState(client);
   if (!before.nextExists || before.nextDisabled) {
     return {
@@ -1399,13 +1451,22 @@ export async function clickSearchNextPage(client) {
     };
   }
   const click = await client.evaluate((selector) => {
-    const next = document.querySelector(selector);
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const pagebars = [...document.querySelectorAll(".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul, .xpath-resume-list-box ul.ant-lpt-pagination, ul.ant-lpt-pagination")];
+    const pagebar = pagebars.find(visible) || pagebars[0] || null;
+    const next = pagebar?.querySelector("li.ant-lpt-pagination-next") || document.querySelector(selector);
     if (!next) return { clicked: false, reason: "next_not_found" };
-    if (next.getAttribute("aria-disabled") === "true" || String(next.className || "").includes("disabled")) {
+    const button = next.querySelector("button") || next;
+    if (next.getAttribute("aria-disabled") === "true" || String(next.className || "").includes("disabled") || button.disabled) {
       return { clicked: false, reason: "next_disabled" };
     }
     next.scrollIntoView({ block: "center" });
-    next.click();
+    button.click();
     return {
       clicked: true,
       className: String(next.className || "")
@@ -1421,7 +1482,7 @@ export async function clickSearchNextPage(client) {
     };
   }
   await waitForSearchListRefresh(client, beforeList, { timeoutMs: 15000 });
-  const after = await readSearchPaginationState(client);
+  const after = await waitForSearchPaginationState(client);
   const afterList = await readSearchListState(client);
   return {
     clicked: true,

@@ -22,8 +22,8 @@ import {
   prepareSearchJobSelection,
   readSearchListState,
   readSearchModalSnapshot,
-  readSearchPaginationState,
   setSearchHideReadFilter,
+  waitForSearchPaginationState,
   waitForSearchCards
 } from "./search-action.js";
 
@@ -213,14 +213,18 @@ export async function runSearchChatChain({
         const listState = await readSearchListState(client);
         currentPageNumber = parsePageNumber(listState.activePageText, currentPageNumber);
         if (pageCardIndex >= listState.cardCount) {
-          const pagination = await readSearchPaginationState(client);
+          const pagination = await waitForSearchPaginationState(client, { timeoutMs: 7000 });
           if (!pagination.nextExists || pagination.nextDisabled) {
             violations.push({
               code: "search_reached_last_page_before_target",
               scannedCandidates: items.length,
               passedCandidates,
               greetedCandidates,
-              requestedCandidateLimit
+              requestedCandidateLimit,
+              currentPageNumber,
+              pageCardIndex,
+              listState,
+              pagination
             });
             break;
           }
@@ -228,7 +232,12 @@ export async function runSearchChatChain({
           if (!nextPage.clicked) {
             violations.push({
               code: "search_next_page_not_clicked",
-              reason: nextPage.reason || "unknown"
+              reason: nextPage.reason || "unknown",
+              currentPageNumber,
+              pageCardIndex,
+              listState,
+              pagination: nextPage.before || pagination,
+              beforeList: nextPage.beforeList || null
             });
             break;
           }
