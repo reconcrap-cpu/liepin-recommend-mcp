@@ -1250,10 +1250,12 @@ export async function closeSearchModalToList(client, {
         waitMs: waitForSentGreetingUpsellMs,
         closeTimeoutMs: 2500
       });
+    const listScrollRestore = await restoreSearchListScrollState(client);
     return {
       closed: Boolean(delayedUpsellClose?.closed),
       closeMethod: delayedUpsellClose?.present ? "sent_greeting_upsell" : "already_closed",
-      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(delayedUpsellClose)
+      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(delayedUpsellClose),
+      listScrollRestore
     };
   }
   const click = await client.evaluate((selectors) => {
@@ -1309,12 +1311,14 @@ export async function closeSearchModalToList(client, {
           waitMs: waitForSentGreetingUpsellMs,
           closeTimeoutMs: 2500
         });
+        const listScrollRestore = await restoreSearchListScrollState(client);
         return {
           closed: Boolean(sentGreetingUpsellModal?.closed),
           resumeModalClosed: true,
           closeMethod: click.clicked ? "close_button+mouse" : "mouse",
           click,
-          sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
+          sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal),
+          listScrollRestore
         };
       }
     }
@@ -1336,6 +1340,7 @@ export async function closeSearchModalToList(client, {
       waitMs: waitForSentGreetingUpsellMs,
       closeTimeoutMs: 2500
     });
+    const listScrollRestore = await restoreSearchListScrollState(client);
     return {
       closed: Boolean(closedAfterFallbacks && sentGreetingUpsellModal?.closed),
       resumeModalClosed: Boolean(closedAfterFallbacks),
@@ -1346,19 +1351,22 @@ export async function closeSearchModalToList(client, {
       ].filter(Boolean).join("+"),
       click,
       forceDismiss: forceDismiss?.removed ? forceDismiss : null,
-      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
+      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal),
+      listScrollRestore
     };
   }
   const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
     waitMs: waitForSentGreetingUpsellMs,
     closeTimeoutMs: 2500
   });
+  const listScrollRestore = await restoreSearchListScrollState(client);
   return {
     closed: Boolean(closed && sentGreetingUpsellModal?.closed),
     resumeModalClosed: Boolean(closed),
     closeMethod: click.clicked ? "close_button" : "none",
     click,
-    sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
+    sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal),
+    listScrollRestore
   };
 }
 
@@ -1412,12 +1420,87 @@ async function forceDismissSearchDetailModal(client) {
       }
     }
     document.body?.classList?.remove("ant-lpt-scrolling-effect");
-    document.body.style.overflow = "";
+    document.body.style.overflow = "auto";
+    document.body.style.overflowY = "auto";
     document.body.style.width = "";
+    document.body.style.paddingRight = "";
+    document.documentElement.style.overflow = "";
+    document.documentElement.style.overflowY = "";
+    document.documentElement.style.height = "";
     return {
       removed: removed.length > 0,
       removedCount: removed.length,
       removedNodes: removed
+    };
+  }, searchSelectors);
+}
+
+async function restoreSearchListScrollState(client) {
+  return client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const hasOpenDetailModal = [...document.querySelectorAll(selectors.modalPrintable)]
+      .some((node) => visible(node) && normalize(node.innerText || node.textContent).length > 100);
+    if (hasOpenDetailModal) {
+      return {
+        restored: false,
+        reason: "search_detail_modal_still_open"
+      };
+    }
+
+    const modalRootSelector = `${selectors.modalRoot}, .ant-lpt-modal-root`;
+    const removedRoots = [];
+    for (const root of document.querySelectorAll(modalRootSelector)) {
+      const textLength = normalize(root.innerText || root.textContent).length;
+      if (!visible(root) || textLength === 0) {
+        removedRoots.push({
+          className: String(root.className || ""),
+          textLength,
+          visible: visible(root)
+        });
+        root.remove();
+      }
+    }
+    const removedMasks = [];
+    for (const mask of document.querySelectorAll(".ant-lpt-modal-mask, .ant-lpt-modal-wrap")) {
+      const root = mask.closest(modalRootSelector);
+      if (!visible(mask) || !root || !document.body.contains(root)) {
+        removedMasks.push({
+          className: String(mask.className || ""),
+          visible: visible(mask)
+        });
+        mask.remove();
+      }
+    }
+    const previousUrl = location.href;
+    if (location.hash === "#preview") {
+      history.replaceState(history.state, document.title, location.pathname + location.search);
+    }
+    document.body?.classList?.remove("ant-lpt-scrolling-effect");
+    document.body.style.overflow = "auto";
+    document.body.style.overflowY = "auto";
+    document.body.style.width = "";
+    document.body.style.paddingRight = "";
+    document.documentElement.style.overflow = "";
+    document.documentElement.style.overflowY = "";
+    document.documentElement.style.height = "";
+    return {
+      restored: true,
+      previousUrl,
+      currentUrl: location.href,
+      removedRootCount: removedRoots.length,
+      removedMaskCount: removedMasks.length,
+      bodyOverflowY: window.getComputedStyle(document.body).overflowY,
+      htmlOverflowY: window.getComputedStyle(document.documentElement).overflowY,
+      htmlScrollHeight: document.documentElement.scrollHeight,
+      bodyScrollHeight: document.body.scrollHeight,
+      removedRoots,
+      removedMasks
     };
   }, searchSelectors);
 }

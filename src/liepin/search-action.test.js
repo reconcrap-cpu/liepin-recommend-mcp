@@ -265,7 +265,12 @@ test("closeSearchModalToList closes a standalone sent greeting upsell", async ()
       status: "",
       reason: "sent_greeting_upsell_modal_not_found"
     },
-    false
+    false,
+    {
+      restored: true,
+      removedRootCount: 0,
+      bodyOverflowY: "auto"
+    }
   ];
   const client = {
     async evaluate() {
@@ -298,6 +303,11 @@ test("closeSearchModalToList ignores residual wrappers without printable resume 
       present: false,
       status: "",
       reason: "sent_greeting_upsell_modal_not_found"
+    },
+    {
+      restored: true,
+      removedRootCount: 1,
+      bodyOverflowY: "auto"
     }
   ];
   const client = {
@@ -312,6 +322,7 @@ test("closeSearchModalToList ignores residual wrappers without printable resume 
   assert.equal(closeAction.closed, true);
   assert.equal(closeAction.closeMethod, "already_closed");
   assert.equal(closeAction.sentGreetingUpsellModal, null);
+  assert.equal(closeAction.listScrollRestore.removedRootCount, 1);
   assert.equal(evaluations.length, 0);
 });
 
@@ -358,6 +369,11 @@ test("closeSearchModalToList waits for delayed upsell after closing resume modal
       present: false,
       status: "",
       reason: "sent_greeting_upsell_modal_not_found"
+    },
+    {
+      restored: true,
+      removedRootCount: 0,
+      bodyOverflowY: "auto"
     }
   ];
   const client = {
@@ -401,6 +417,11 @@ test("closeSearchModalToList falls back to real mouse close when DOM click is ig
       present: false,
       status: "",
       reason: "sent_greeting_upsell_modal_not_found"
+    },
+    {
+      restored: true,
+      removedRootCount: 0,
+      bodyOverflowY: "auto"
     }
   ];
   const waitResults = [false, true];
@@ -454,6 +475,16 @@ test("closeSearchModalToList force-removes a stuck search detail modal after clo
       present: false,
       status: "",
       reason: "sent_greeting_upsell_modal_not_found"
+    },
+    {
+      restored: true,
+      previousUrl: "https://lpt.liepin.com/search#preview",
+      currentUrl: "https://lpt.liepin.com/search",
+      removedRootCount: 1,
+      bodyOverflowY: "auto",
+      htmlOverflowY: "visible",
+      htmlScrollHeight: 3968,
+      bodyScrollHeight: 3968
     }
   ];
   const waitResults = [false, false, false, true];
@@ -478,6 +509,8 @@ test("closeSearchModalToList force-removes a stuck search detail modal after clo
   assert.equal(closeAction.resumeModalClosed, true);
   assert.equal(closeAction.closeMethod, "close_button+escape+force_remove");
   assert.equal(closeAction.forceDismiss.removed, true);
+  assert.equal(closeAction.listScrollRestore.currentUrl, "https://lpt.liepin.com/search");
+  assert.equal(closeAction.listScrollRestore.bodyOverflowY, "auto");
   assert.deepEqual(sent.map((item) => item.method), [
     "Input.dispatchMouseEvent",
     "Input.dispatchMouseEvent",
