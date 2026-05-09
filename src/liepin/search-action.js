@@ -7,6 +7,7 @@ import {
 } from "./chat-card-limit.js";
 import {
   closeSentGreetingUpsellModal,
+  readSentGreetingUpsellModal,
   isSentGreetingUpsellModalText
 } from "./sent-greeting-upsell.js";
 import {
@@ -1234,8 +1235,13 @@ export async function confirmSearchServiceJobModal(client) {
   }, searchSelectors);
 }
 
-export async function closeSearchModalToList(client) {
+export async function closeSearchModalToList(client, {
+  waitForSentGreetingUpsellMs = 0
+} = {}) {
   await closeSearchServiceJobModalIfOpen(client);
+  const beforeUpsellClose = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: 2500
+  });
   const before = await client.evaluate((selectors) => {
     const visible = (node) => {
       if (!node) return false;
@@ -1246,9 +1252,16 @@ export async function closeSearchModalToList(client) {
     return [...document.querySelectorAll(selectors.modalRoot)].some(visible);
   }, searchSelectors);
   if (!before) {
+    const delayedUpsellClose = beforeUpsellClose?.present
+      ? beforeUpsellClose
+      : await waitForAndCloseSentGreetingUpsellModal(client, {
+        waitMs: waitForSentGreetingUpsellMs,
+        closeTimeoutMs: 2500
+      });
     return {
-      closed: true,
-      closeMethod: "already_closed"
+      closed: Boolean(delayedUpsellClose?.closed),
+      closeMethod: delayedUpsellClose?.present ? "sent_greeting_upsell" : "already_closed",
+      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(delayedUpsellClose)
     };
   }
   const click = await client.evaluate((selectors) => {
@@ -1301,17 +1314,60 @@ export async function closeSearchModalToList(client) {
       timeoutMs: 3000,
       pollMs: 250
     });
+    const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
+      waitMs: waitForSentGreetingUpsellMs,
+      closeTimeoutMs: 2500
+    });
     return {
-      closed: Boolean(closedByEscape),
+      closed: Boolean(closedByEscape && sentGreetingUpsellModal?.closed),
+      resumeModalClosed: Boolean(closedByEscape),
       closeMethod: click.clicked ? "close_button+escape" : "escape",
-      click
+      click,
+      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
     };
   }
+  const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
+    waitMs: waitForSentGreetingUpsellMs,
+    closeTimeoutMs: 2500
+  });
   return {
-    closed: Boolean(closed),
+    closed: Boolean(closed && sentGreetingUpsellModal?.closed),
+    resumeModalClosed: Boolean(closed),
     closeMethod: click.clicked ? "close_button" : "none",
-    click
+    click,
+    sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
   };
+}
+
+async function waitForAndCloseSentGreetingUpsellModal(client, {
+  waitMs = 0,
+  closeTimeoutMs = 2500,
+  pollMs = 200
+} = {}) {
+  const immediate = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: closeTimeoutMs,
+    pollMs
+  });
+  if (immediate?.present || waitMs <= 0) return immediate;
+
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+    const snapshot = await readSentGreetingUpsellModal(client);
+    if (snapshot?.present) {
+      return closeSentGreetingUpsellModal(client, {
+        timeoutMs: closeTimeoutMs,
+        pollMs
+      });
+    }
+  }
+  return immediate;
+}
+
+function summarizeSentGreetingUpsellClose(result) {
+  if (!result) return null;
+  if (result.present || result.clicked || result.closed === false) return result;
+  return null;
 }
 
 async function pressSearchEscapeKey(client) {

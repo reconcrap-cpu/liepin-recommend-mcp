@@ -150,10 +150,19 @@ export async function closeSentGreetingUpsellModal(client, {
   });
 
   if (!click.clicked) {
+    const forceDismiss = await forceDismissSentGreetingUpsellModal(client);
+    const closedAfterForce = forceDismiss.removed
+      ? await waitForSentGreetingUpsellModalClosed(client, {
+        timeoutMs: Math.min(timeoutMs, 1000),
+        pollMs
+      })
+      : false;
     return {
       ...before,
       ...click,
-      closed: false
+      closed: Boolean(closedAfterForce),
+      closeMethod: forceDismiss.removed ? "force_remove" : "",
+      forceDismiss
     };
   }
 
@@ -161,6 +170,23 @@ export async function closeSentGreetingUpsellModal(client, {
     timeoutMs,
     pollMs
   });
+  if (!closed) {
+    const forceDismiss = await forceDismissSentGreetingUpsellModal(client);
+    const closedAfterForce = forceDismiss.removed
+      ? await waitForSentGreetingUpsellModalClosed(client, {
+        timeoutMs: Math.min(timeoutMs, 1000),
+        pollMs
+      })
+      : false;
+    return {
+      ...before,
+      clicked: true,
+      closeClick: click,
+      closed: Boolean(closedAfterForce),
+      closeMethod: `${click.closeMethod || "click"}+force_remove`,
+      forceDismiss
+    };
+  }
   return {
     ...before,
     clicked: true,
@@ -168,6 +194,68 @@ export async function closeSentGreetingUpsellModal(client, {
     closed: Boolean(closed),
     closeMethod: click.closeMethod
   };
+}
+
+async function forceDismissSentGreetingUpsellModal(client) {
+  return client.evaluate(() => {
+    const normalize = (value) => String(value || "").replace(/\s+/gu, " ").trim();
+    const compact = (value) => normalize(value).replace(/\s+/gu, "");
+    const getText = (node) => normalize(node?.innerText || node?.textContent || "");
+    const isSentGreetingUpsellText = (value) => {
+      const text = compact(value);
+      return text.includes("已向候选人发送消息")
+        && (
+          text.includes("更快获取人选回复")
+          || text.includes("超级聊聊权益")
+          || text.includes("加急通道触达")
+          || text.includes("免费发起")
+        );
+    };
+    const roots = [...new Set([
+      ...document.querySelectorAll(".ant-im-modal-root"),
+      ...document.querySelectorAll(".ant-im-modal-content"),
+      ...document.querySelectorAll(".ant-im-modal"),
+      ...document.querySelectorAll(".ant-im-modal-wrap"),
+      ...document.querySelectorAll("[role='dialog']")
+    ])];
+    const modal = roots.find((node) => isSentGreetingUpsellText(getText(node))) || null;
+    if (!modal) {
+      return {
+        removed: false,
+        reason: "sent_greeting_upsell_modal_not_found"
+      };
+    }
+    const root = modal.closest(".ant-im-modal-root")
+      || modal.closest(".ant-im-modal-wrap")
+      || modal.closest(".ant-im-modal")
+      || modal;
+    const rootText = getText(root);
+    if (!isSentGreetingUpsellText(rootText)) {
+      return {
+        removed: false,
+        reason: "sent_greeting_upsell_root_mismatch"
+      };
+    }
+    const removedClasses = [];
+    const removable = new Set([root]);
+    for (const node of root.querySelectorAll(".ant-im-modal-mask, .ant-im-modal-wrap, .ant-im-modal")) {
+      removable.add(node);
+    }
+    for (const node of removable) {
+      removedClasses.push(String(node.className || node.tagName || ""));
+      node.remove();
+    }
+    document.body.classList.remove("ant-im-modal-open");
+    if (document.body.style.overflow === "hidden") {
+      document.body.style.overflow = "";
+    }
+    return {
+      removed: true,
+      reason: "sent_greeting_upsell_force_removed",
+      removedCount: removedClasses.length,
+      removedClasses
+    };
+  });
 }
 
 async function waitForSentGreetingUpsellModalClosed(client, {

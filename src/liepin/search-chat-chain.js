@@ -409,7 +409,9 @@ export async function runSearchChatChain({
           items.push(item);
           finalizeItemProgress(item);
         } finally {
-          const closeAction = await closeSearchModalToList(client);
+          const closeAction = await closeSearchModalToList(client, {
+            waitForSentGreetingUpsellMs: item?.chatAction?.clicked ? 5000 : 0
+          });
           if (item) {
             item.closeAction = closeAction;
             if (!closeAction.closed) {

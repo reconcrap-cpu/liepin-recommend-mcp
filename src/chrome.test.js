@@ -7,7 +7,8 @@ import {
   findChromeExecutable,
   getLiepinTargetUrl,
   isCdpRuntimeTimeoutError,
-  isLiepinRiskPageUrl
+  isLiepinRiskPageUrl,
+  MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS
 } from "./chrome.js";
 
 test("classifyLiepinPage detects Liepin risk captcha before normal pages", () => {
@@ -92,4 +93,22 @@ test("evaluateWithTimeout forwards timeout to Runtime.evaluate", async () => {
   assert.equal(result, "ok");
   assert.equal(observed.method, "Runtime.evaluate");
   assert.equal(observed.options.timeoutMs, 1234);
+});
+
+test("waitFor avoids near-zero Runtime.evaluate timeouts at the deadline", async () => {
+  const client = new CdpPageClient("ws://example.test/devtools/page/test");
+  const observedTimeouts = [];
+  client.evaluateWithTimeout = async (_predicateFn, _args, options) => {
+    observedTimeouts.push(options.timeoutMs);
+    return false;
+  };
+
+  const result = await client.waitFor(() => false, [], {
+    timeoutMs: 5,
+    pollMs: 1
+  });
+
+  assert.equal(result, null);
+  assert.ok(observedTimeouts.length >= 1);
+  assert.ok(observedTimeouts.every((value) => value >= MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS));
 });

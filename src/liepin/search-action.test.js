@@ -5,8 +5,12 @@ import {
   COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
   isChatCardLimitModalText
 } from "./chat-card-limit.js";
-import { isSentGreetingUpsellModalText } from "./sent-greeting-upsell.js";
 import {
+  closeSentGreetingUpsellModal,
+  isSentGreetingUpsellModalText
+} from "./sent-greeting-upsell.js";
+import {
+  closeSearchModalToList,
   executeSearchChatAction,
   isAlreadyContactedButtonText,
   isImmediateChatButtonText,
@@ -235,5 +239,159 @@ test("closes sent greeting upsell after search greeting and counts the greeting"
   assert.equal(action.clicked, true);
   assert.equal(action.modalClosed, true);
   assert.equal(action.sentGreetingUpsellModal.clicked, true);
+  assert.equal(evaluations.length, 0);
+});
+
+test("closeSearchModalToList closes a standalone sent greeting upsell", async () => {
+  const modalText = "已向候选人发送消息 更快获取人选回复 免费发起 关闭";
+  const evaluations = [
+    {
+      clicked: false,
+      reason: "modal_not_open"
+    },
+    {
+      present: true,
+      status: "sent_greeting_upsell_modal",
+      reason: "sent_greeting_upsell_modal",
+      modalText
+    },
+    {
+      clicked: true,
+      text: "关闭",
+      closeMethod: "button_text"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    },
+    false
+  ];
+  const client = {
+    async evaluate() {
+      if (evaluations.length === 0) throw new Error("Unexpected evaluate call");
+      return evaluations.shift();
+    }
+  };
+
+  const closeAction = await closeSearchModalToList(client);
+
+  assert.equal(closeAction.closed, true);
+  assert.equal(closeAction.closeMethod, "sent_greeting_upsell");
+  assert.equal(closeAction.sentGreetingUpsellModal.clicked, true);
+  assert.equal(evaluations.length, 0);
+});
+
+test("closeSearchModalToList waits for delayed upsell after closing resume modal", async () => {
+  const modalText = "已向候选人发送消息 加急通道触达 免费发起 关闭";
+  const evaluations = [
+    {
+      clicked: false,
+      reason: "modal_not_open"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    },
+    true,
+    {
+      clicked: true,
+      className: "ant-lpt-modal-close"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    },
+    {
+      present: true,
+      status: "sent_greeting_upsell_modal",
+      reason: "sent_greeting_upsell_modal",
+      modalText
+    },
+    {
+      present: true,
+      status: "sent_greeting_upsell_modal",
+      reason: "sent_greeting_upsell_modal",
+      modalText
+    },
+    {
+      clicked: true,
+      text: "关闭",
+      closeMethod: "button_text"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    }
+  ];
+  const client = {
+    async evaluate() {
+      if (evaluations.length === 0) throw new Error("Unexpected evaluate call");
+      return evaluations.shift();
+    },
+    async waitFor() {
+      return true;
+    }
+  };
+
+  const closeAction = await closeSearchModalToList(client, {
+    waitForSentGreetingUpsellMs: 5
+  });
+
+  assert.equal(closeAction.closed, true);
+  assert.equal(closeAction.resumeModalClosed, true);
+  assert.equal(closeAction.sentGreetingUpsellModal.clicked, true);
+  assert.equal(evaluations.length, 0);
+});
+
+test("closeSentGreetingUpsellModal force-removes stuck leave animation modal", async () => {
+  const modalText = "已向候选人发送消息 加急通道触达 免费发起 关闭";
+  const evaluations = [
+    {
+      present: true,
+      status: "sent_greeting_upsell_modal",
+      reason: "sent_greeting_upsell_modal",
+      modalText
+    },
+    {
+      clicked: true,
+      text: "关闭",
+      closeMethod: "button_text"
+    },
+    {
+      present: true,
+      status: "sent_greeting_upsell_modal",
+      reason: "sent_greeting_upsell_modal",
+      modalText
+    },
+    {
+      removed: true,
+      reason: "sent_greeting_upsell_force_removed",
+      removedCount: 2
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    }
+  ];
+  const client = {
+    async evaluate() {
+      if (evaluations.length === 0) throw new Error("Unexpected evaluate call");
+      return evaluations.shift();
+    }
+  };
+
+  const closeAction = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: 0,
+    pollMs: 1
+  });
+
+  assert.equal(closeAction.closed, true);
+  assert.equal(closeAction.closeMethod, "button_text+force_remove");
+  assert.equal(closeAction.forceDismiss.removed, true);
   assert.equal(evaluations.length, 0);
 });

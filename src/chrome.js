@@ -7,6 +7,7 @@ import { DEFAULT_DEBUG_PORT, LIEPIN_URLS } from "./constants.js";
 import { normalizeText, parsePositiveInteger, sleep } from "./utils.js";
 
 export const DEFAULT_CDP_CALL_TIMEOUT_MS = 30000;
+export const MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS = 1000;
 
 export async function connectToChrome({ port = DEFAULT_DEBUG_PORT } = {}) {
   const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
@@ -447,11 +448,23 @@ export class CdpPageClient {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const remainingMs = Math.max(1, deadline - Date.now());
-      const result = await this.evaluateWithTimeout(predicateFn, args, {
-        timeoutMs: Math.min(DEFAULT_CDP_CALL_TIMEOUT_MS, remainingMs)
-      });
+      let result = null;
+      try {
+        result = await this.evaluateWithTimeout(predicateFn, args, {
+          timeoutMs: Math.min(
+            DEFAULT_CDP_CALL_TIMEOUT_MS,
+            Math.max(MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS, remainingMs)
+          )
+        });
+      } catch (error) {
+        if (isCdpRuntimeTimeoutError(error) && Date.now() >= deadline) {
+          return null;
+        }
+        throw error;
+      }
       if (result) return result;
-      await sleep(pollMs);
+      const sleepMs = Math.min(pollMs, Math.max(0, deadline - Date.now()));
+      if (sleepMs > 0) await sleep(sleepMs);
     }
     return null;
   }
