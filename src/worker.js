@@ -2,8 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_ROBUSTNESS_MODE,
   DEFAULT_RECOMMEND_STEP_DELAY_MS,
-  ROBUSTNESS_MODES,
   RUN_KINDS,
   RUN_WORKFLOWS
 } from "./constants.js";
@@ -77,7 +77,7 @@ export async function runWorker({
   const selectedWorkflow = normalizeText(snapshot.input?.workflow) || legacyWorkflowForKind(snapshot.kind);
   const artifacts = snapshot.artifacts || getRunArtifactPaths(workspaceRoot, runId);
   const robustnessRuntime = createLongRunRuntime({
-    mode: normalizeRobustnessMode(snapshot.input?.robustness_mode, ROBUSTNESS_MODES.OFF),
+    mode: normalizeRobustnessMode(snapshot.input?.robustness_mode, DEFAULT_ROBUSTNESS_MODE),
     workflow: selectedWorkflow,
     runId,
     checkpointPath: artifacts.checkpointPath,
@@ -358,6 +358,7 @@ export async function executeWorkflow({
       config: llm.config,
       provider: llm.provider,
       checkpoint,
+      robustnessMode: robustnessRuntime?.mode || DEFAULT_ROBUSTNESS_MODE,
       onCheckpoint: async (checkpointPayload) => {
         const writer = async (payload) => {
           writeJsonFile(artifacts.checkpointPath, payload);

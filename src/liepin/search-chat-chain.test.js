@@ -59,6 +59,63 @@ test("evaluateSearchChatChain counts only newly sent search greetings toward tar
   assert.equal(summary.alreadyContactedCandidates, 1);
 });
 
+test("summarizeSearchChatChain reports bounded search recovery count", () => {
+  const summary = summarizeSearchChatChain({
+    schemaVersion: SEARCH_CHAT_CHAIN_SCHEMA_VERSION,
+    passed: false,
+    profile: "测试",
+    jobTitle: "招聘实习生",
+    requestedCandidateLimit: 2,
+    greetedCandidates: 1,
+    recoveries: [
+      {
+        type: "search_open_candidate",
+        recovered: true,
+        skipped: true,
+        reason: "open_retry_failed_candidate_skipped"
+      }
+    ],
+    violations: [],
+    items: []
+  });
+
+  assert.equal(summary.recoveries, 1);
+  assert.equal(summary.violations.includes("not_enough_search_greetings"), true);
+});
+
+test("evaluateSearchChatChain ignores recovered search-open skips as unscreened candidates", () => {
+  const evaluation = evaluateSearchChatChain({
+    schemaVersion: SEARCH_CHAT_CHAIN_SCHEMA_VERSION,
+    profile: "测试",
+    jobTitle: "招聘实习生",
+    requestedCandidateLimit: 1,
+    greetedCandidates: 1,
+    violations: [],
+    items: [
+      {
+        index: 0,
+        llmCalled: false,
+        status: "search_open_recovered_skip",
+        recovery: {
+          recovered: true,
+          skipped: true
+        }
+      },
+      {
+        index: 1,
+        llmCalled: true,
+        decision: { decision: "pass", post_action: "chat" },
+        chatAction: { ok: true, clicked: true, status: "search_contacted" },
+        closeAction: { closed: true },
+        status: "search_contacted"
+      }
+    ]
+  });
+
+  assert.equal(evaluation.passed, true);
+  assert.deepEqual(evaluation.failures, []);
+});
+
 test("evaluateSearchChatChain fails when target is not reached", () => {
   const evaluation = evaluateSearchChatChain({
     schemaVersion: SEARCH_CHAT_CHAIN_SCHEMA_VERSION,

@@ -401,7 +401,7 @@ function createStartTool(name, kind) {
         robustness_mode: {
           type: "string",
           enum: ["off", "observe", "recover"],
-          description: "Opt-in long-run robustness layer. off preserves current behavior; observe records heartbeats/timing/checkpoints; recover is reserved for bounded recovery canaries."
+          description: "Long-run robustness layer. Defaults to recover; off preserves legacy behavior; observe records heartbeats/timing/checkpoints without recovery decisions."
         },
         heartbeat_interval_ms: {
           type: "integer",

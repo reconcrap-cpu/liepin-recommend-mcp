@@ -1242,15 +1242,7 @@ export async function closeSearchModalToList(client, {
   const beforeUpsellClose = await closeSentGreetingUpsellModal(client, {
     timeoutMs: 2500
   });
-  const before = await client.evaluate((selectors) => {
-    const visible = (node) => {
-      if (!node) return false;
-      const style = window.getComputedStyle(node);
-      const rect = node.getBoundingClientRect();
-      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-    };
-    return [...document.querySelectorAll(selectors.modalRoot)].some(visible);
-  }, searchSelectors);
+  const before = await hasOpenSearchDetailModal(client);
   if (!before) {
     const delayedUpsellClose = beforeUpsellClose?.present
       ? beforeUpsellClose
@@ -1273,8 +1265,15 @@ export async function closeSearchModalToList(client, {
     };
     const roots = [...document.querySelectorAll(selectors.modalRoot)].filter(visible);
     const root = roots[roots.length - 1] || document.querySelector(selectors.modalRoot);
-    const button = root?.querySelector("[class*='closeBtn'] [class*='antlpticon-close'], [class*='closeBtn'], .ant-lpt-modal-close, [aria-label='Close']")
-      || document.querySelector(selectors.modalCloseButton);
+    const candidates = [
+      ...(root ? [...root.querySelectorAll("[class*='closeBtn'] [class*='antlpticon-close'], [class*='closeBtn'], .ant-lpt-modal-close, [aria-label='Close']")] : []),
+      ...document.querySelectorAll(selectors.modalCloseButton)
+    ];
+    const visibleCandidates = candidates.filter(visible);
+    const button = visibleCandidates.find((node) => String(node.className || "").includes("closeBtn"))
+      || visibleCandidates.find((node) => String(node.className || "").includes("antlpticon-close"))
+      || visibleCandidates[0]
+      || candidates[0];
     if (!button) {
       return {
         clicked: false,
@@ -1282,47 +1281,71 @@ export async function closeSearchModalToList(client, {
       };
     }
     button.scrollIntoView({ block: "center" });
+    const rect = button.getBoundingClientRect();
     button.click();
     return {
       clicked: true,
-      className: String(button.className || "")
+      className: String(button.className || ""),
+      target: {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      }
     };
   }, searchSelectors);
-  const closed = await client.waitFor((selectors) => {
-    const visible = (node) => {
-      if (!node) return false;
-      const style = window.getComputedStyle(node);
-      const rect = node.getBoundingClientRect();
-      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-    };
-    return ![...document.querySelectorAll(selectors.modalRoot)].some(visible);
-  }, [searchSelectors], {
+  const closed = await waitForSearchDetailModalClosed(client, {
     timeoutMs: 7000,
     pollMs: 250
   });
   if (!closed) {
+    let closedByMouse = false;
+    if (click.target) {
+      await dispatchSearchMouseClick(client, click.target);
+      closedByMouse = await waitForSearchDetailModalClosed(client, {
+        timeoutMs: 3000,
+        pollMs: 250
+      });
+      if (closedByMouse) {
+        const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
+          waitMs: waitForSentGreetingUpsellMs,
+          closeTimeoutMs: 2500
+        });
+        return {
+          closed: Boolean(sentGreetingUpsellModal?.closed),
+          resumeModalClosed: true,
+          closeMethod: click.clicked ? "close_button+mouse" : "mouse",
+          click,
+          sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
+        };
+      }
+    }
     await pressSearchEscapeKey(client);
-    const closedByEscape = await client.waitFor((selectors) => {
-      const visible = (node) => {
-        if (!node) return false;
-        const style = window.getComputedStyle(node);
-        const rect = node.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-      };
-      return ![...document.querySelectorAll(selectors.modalRoot)].some(visible);
-    }, [searchSelectors], {
+    const closedByEscape = await waitForSearchDetailModalClosed(client, {
       timeoutMs: 3000,
       pollMs: 250
     });
+    let forceDismiss = null;
+    let closedAfterFallbacks = closedByEscape;
+    if (!closedByEscape) {
+      forceDismiss = await forceDismissSearchDetailModal(client);
+      closedAfterFallbacks = await waitForSearchDetailModalClosed(client, {
+        timeoutMs: 1000,
+        pollMs: 100
+      });
+    }
     const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
       waitMs: waitForSentGreetingUpsellMs,
       closeTimeoutMs: 2500
     });
     return {
-      closed: Boolean(closedByEscape && sentGreetingUpsellModal?.closed),
-      resumeModalClosed: Boolean(closedByEscape),
-      closeMethod: click.clicked ? "close_button+escape" : "escape",
+      closed: Boolean(closedAfterFallbacks && sentGreetingUpsellModal?.closed),
+      resumeModalClosed: Boolean(closedAfterFallbacks),
+      closeMethod: [
+        click.clicked ? "close_button" : "",
+        "escape",
+        forceDismiss?.removed ? "force_remove" : ""
+      ].filter(Boolean).join("+"),
       click,
+      forceDismiss: forceDismiss?.removed ? forceDismiss : null,
       sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
     };
   }
@@ -1337,6 +1360,100 @@ export async function closeSearchModalToList(client, {
     click,
     sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal)
   };
+}
+
+async function dispatchSearchMouseClick(client, target = {}) {
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: target.x,
+    y: target.y,
+    button: "none",
+    buttons: 0,
+    clickCount: 0
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1
+  });
+}
+
+async function forceDismissSearchDetailModal(client) {
+  return client.evaluate((selectors) => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const roots = [...document.querySelectorAll(selectors.modalRoot)].filter(visible);
+    const removed = [];
+    for (const root of roots) {
+      removed.push({
+        className: String(root.className || ""),
+        textLength: String(root.innerText || root.textContent || "").length
+      });
+      root.remove();
+    }
+    for (const mask of document.querySelectorAll(".ant-lpt-modal-mask, .ant-lpt-modal-wrap")) {
+      if (visible(mask) && !document.body.contains(mask.closest(selectors.modalRoot))) {
+        mask.remove();
+      }
+    }
+    document.body?.classList?.remove("ant-lpt-scrolling-effect");
+    document.body.style.overflow = "";
+    document.body.style.width = "";
+    return {
+      removed: removed.length > 0,
+      removedCount: removed.length,
+      removedNodes: removed
+    };
+  }, searchSelectors);
+}
+
+async function hasOpenSearchDetailModal(client) {
+  return client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const printableNodes = [...document.querySelectorAll(selectors.modalPrintable)];
+    return printableNodes.some((node) => visible(node) && normalize(node.innerText || node.textContent).length > 100);
+  }, searchSelectors);
+}
+
+async function waitForSearchDetailModalClosed(client, {
+  timeoutMs = 7000,
+  pollMs = 250
+} = {}) {
+  return client.waitFor((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const printableNodes = [...document.querySelectorAll(selectors.modalPrintable)];
+    return !printableNodes.some((node) => visible(node) && normalize(node.innerText || node.textContent).length > 100);
+  }, [searchSelectors], {
+    timeoutMs,
+    pollMs
+  });
 }
 
 async function waitForAndCloseSentGreetingUpsellModal(client, {

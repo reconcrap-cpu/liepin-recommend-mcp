@@ -1,4 +1,4 @@
-import { ROBUSTNESS_MODES } from "./constants.js";
+import { DEFAULT_ROBUSTNESS_MODE, ROBUSTNESS_MODES } from "./constants.js";
 import { normalizeText, toIsoNow, writeJsonFile } from "./utils.js";
 
 export const LONG_RUN_OBSERVE_CHECKPOINT_SCHEMA_VERSION = "liepin_long_run_observe_checkpoint_v1";
@@ -14,7 +14,7 @@ const CANDIDATE_START_STAGES = new Set([
   "open_resume_modal"
 ]);
 
-export function normalizeRobustnessMode(value, fallback = ROBUSTNESS_MODES.OFF) {
+export function normalizeRobustnessMode(value, fallback = DEFAULT_ROBUSTNESS_MODE) {
   const normalized = normalizeText(value).toLowerCase();
   if (!normalized) return fallback;
   if (Object.values(ROBUSTNESS_MODES).includes(normalized)) return normalized;
@@ -71,6 +71,9 @@ export function classifyLongRunFailure(error) {
     || combined.includes("could not find node")
     || combined.includes("detached")
     || combined.includes("stale")
+    || combined.includes("搜索详情弹窗未出现")
+    || combined.includes("search detail modal")
+    || combined.includes("detail modal")
   ) {
     return {
       category: "recoverable",
@@ -87,7 +90,7 @@ export function classifyLongRunFailure(error) {
 }
 
 export function createLongRunRuntime({
-  mode = ROBUSTNESS_MODES.OFF,
+  mode = DEFAULT_ROBUSTNESS_MODE,
   workflow = "",
   runId = "",
   checkpointPath = "",

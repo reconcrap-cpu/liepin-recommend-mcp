@@ -282,6 +282,39 @@ test("closeSearchModalToList closes a standalone sent greeting upsell", async ()
   assert.equal(evaluations.length, 0);
 });
 
+test("closeSearchModalToList ignores residual wrappers without printable resume content", async () => {
+  const evaluations = [
+    {
+      clicked: false,
+      reason: "modal_not_open"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    },
+    false,
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    }
+  ];
+  const client = {
+    async evaluate() {
+      if (evaluations.length === 0) throw new Error("Unexpected evaluate call");
+      return evaluations.shift();
+    }
+  };
+
+  const closeAction = await closeSearchModalToList(client);
+
+  assert.equal(closeAction.closed, true);
+  assert.equal(closeAction.closeMethod, "already_closed");
+  assert.equal(closeAction.sentGreetingUpsellModal, null);
+  assert.equal(evaluations.length, 0);
+});
+
 test("closeSearchModalToList waits for delayed upsell after closing resume modal", async () => {
   const modalText = "已向候选人发送消息 加急通道触达 免费发起 关闭";
   const evaluations = [
@@ -344,6 +377,114 @@ test("closeSearchModalToList waits for delayed upsell after closing resume modal
   assert.equal(closeAction.closed, true);
   assert.equal(closeAction.resumeModalClosed, true);
   assert.equal(closeAction.sentGreetingUpsellModal.clicked, true);
+  assert.equal(evaluations.length, 0);
+});
+
+test("closeSearchModalToList falls back to real mouse close when DOM click is ignored", async () => {
+  const evaluations = [
+    {
+      clicked: false,
+      reason: "modal_not_open"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    },
+    true,
+    {
+      clicked: true,
+      className: "closeBtn--I_u6B",
+      target: { x: 1178, y: 27 }
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    }
+  ];
+  const waitResults = [false, true];
+  const sent = [];
+  const client = {
+    async evaluate() {
+      if (evaluations.length === 0) throw new Error("Unexpected evaluate call");
+      return evaluations.shift();
+    },
+    async waitFor() {
+      if (waitResults.length === 0) throw new Error("Unexpected waitFor call");
+      return waitResults.shift();
+    },
+    async send(method, params) {
+      sent.push({ method, params });
+    }
+  };
+
+  const closeAction = await closeSearchModalToList(client);
+
+  assert.equal(closeAction.closed, true);
+  assert.equal(closeAction.resumeModalClosed, true);
+  assert.equal(closeAction.closeMethod, "close_button+mouse");
+  assert.deepEqual(sent.map((item) => item.params.type), ["mouseMoved", "mousePressed", "mouseReleased"]);
+  assert.equal(evaluations.length, 0);
+});
+
+test("closeSearchModalToList force-removes a stuck search detail modal after close fallbacks", async () => {
+  const evaluations = [
+    {
+      clicked: false,
+      reason: "modal_not_open"
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    },
+    true,
+    {
+      clicked: true,
+      className: "closeBtn--I_u6B",
+      target: { x: 1178, y: 27 }
+    },
+    {
+      removed: true,
+      removedCount: 1,
+      removedNodes: [{ className: "resume-detail-modal-wrap", textLength: 1000 }]
+    },
+    {
+      present: false,
+      status: "",
+      reason: "sent_greeting_upsell_modal_not_found"
+    }
+  ];
+  const waitResults = [false, false, false, true];
+  const sent = [];
+  const client = {
+    async evaluate() {
+      if (evaluations.length === 0) throw new Error("Unexpected evaluate call");
+      return evaluations.shift();
+    },
+    async waitFor() {
+      if (waitResults.length === 0) throw new Error("Unexpected waitFor call");
+      return waitResults.shift();
+    },
+    async send(method, params) {
+      sent.push({ method, params });
+    }
+  };
+
+  const closeAction = await closeSearchModalToList(client);
+
+  assert.equal(closeAction.closed, true);
+  assert.equal(closeAction.resumeModalClosed, true);
+  assert.equal(closeAction.closeMethod, "close_button+escape+force_remove");
+  assert.equal(closeAction.forceDismiss.removed, true);
+  assert.deepEqual(sent.map((item) => item.method), [
+    "Input.dispatchMouseEvent",
+    "Input.dispatchMouseEvent",
+    "Input.dispatchMouseEvent",
+    "Input.dispatchKeyEvent",
+    "Input.dispatchKeyEvent"
+  ]);
   assert.equal(evaluations.length, 0);
 });
 

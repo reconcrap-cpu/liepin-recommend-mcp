@@ -43,20 +43,20 @@ Use `--execute-request-resume false` or a dry-run workflow when you need no-side
 
 Use the MCP tool `liepin_run_progress` to query progress across recommend, search, chat, and recommend-chat runs. Pass `run_id` for one run, or omit it to list recent runs with optional `kind`, `limit`, and `include_completed` filters.
 
-### Long-run robustness canary
+### Long-run robustness
 
-Long-run instrumentation is opt-in:
+Long-run recovery is enabled by default in the official release:
 
 ```sh
-liepin-mcp recommend-chat start --candidate-limit 5 --scan-limit 10 --robustness-mode observe
-liepin-mcp search start --profile "测试" --job "招聘实习生" --hide-read true --candidate-limit 5 --criteria "搜索筛选条件" --robustness-mode observe
-liepin-mcp chat start --candidate-limit all --job "全部职位" --unread-only false --criteria "聊天筛选条件" --robustness-mode observe
+liepin-mcp recommend-chat start --candidate-limit 5 --scan-limit 10
+liepin-mcp search start --profile "测试" --job "招聘实习生" --hide-read true --candidate-limit 5 --criteria "搜索筛选条件"
+liepin-mcp chat start --candidate-limit all --job "全部职位" --unread-only false --criteria "聊天筛选条件"
 ```
 
 Modes:
-- `off`: default rollback-safe behavior.
+- `recover`: default long-run behavior with heartbeat, timing, additive checkpoint metadata, and bounded safe-boundary recovery.
 - `observe`: records heartbeat, candidate timing, phase timing, and additive checkpoint metadata.
-- `recover`: accepted for canary compatibility; recovery decisions should be enabled only after observe-mode performance is validated.
+- `off`: rollback-safe legacy behavior.
 
 Rollback is immediate: start the next run with `--robustness-mode off` or pin the package back to `@reconcrap/liepin-mcp@0.1.28`.
 

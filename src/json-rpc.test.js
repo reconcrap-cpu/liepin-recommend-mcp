@@ -182,7 +182,7 @@ test("run progress lists unified latest runs and filters by kind", async () => {
   }
 });
 
-test("recommend-chat start defaults to production click actions over JSON-RPC", async () => {
+test("recommend-chat start defaults to production click actions and recover robustness over JSON-RPC", async () => {
   const response = await handleJsonRpc({
     jsonrpc: "2.0",
     id: 3,
@@ -199,7 +199,7 @@ test("recommend-chat start defaults to production click actions over JSON-RPC", 
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
   assert.equal(payload.workflow, RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN);
-  assert.equal(payload.robustness_mode, "off");
+  assert.equal(payload.robustness_mode, "recover");
 });
 
 test("recommend-chat start accepts observe robustness mode over JSON-RPC", async () => {

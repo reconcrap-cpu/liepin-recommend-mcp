@@ -2,21 +2,31 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ROBUSTNESS_MODES
+} from "./constants.js";
+import {
   classifyLongRunFailure,
   createLongRunRuntime,
   normalizeRobustnessMode,
   parseHeartbeatIntervalMs
 } from "./long-run-runtime.js";
 
-test("normalizeRobustnessMode defaults unknown values to off", () => {
+test("normalizeRobustnessMode defaults unknown values to recover", () => {
+  assert.equal(normalizeRobustnessMode(undefined), "recover");
   assert.equal(normalizeRobustnessMode("observe"), "observe");
   assert.equal(normalizeRobustnessMode("RECOVER"), "recover");
-  assert.equal(normalizeRobustnessMode("bad-mode"), "off");
+  assert.equal(normalizeRobustnessMode("bad-mode"), "recover");
+  assert.equal(normalizeRobustnessMode("bad-mode", ROBUSTNESS_MODES.OFF), "off");
   assert.equal(parseHeartbeatIntervalMs(1), 5000);
 });
 
 test("classifyLongRunFailure separates terminal and recoverable failures", () => {
   assert.deepEqual(classifyLongRunFailure(new Error("Runtime.evaluate timed out after 30000ms")), {
+    category: "recoverable",
+    reason: "transient_browser_or_cdp_failure",
+    recoverable: true
+  });
+  assert.deepEqual(classifyLongRunFailure(new Error("搜索详情弹窗未出现")), {
     category: "recoverable",
     reason: "transient_browser_or_cdp_failure",
     recoverable: true

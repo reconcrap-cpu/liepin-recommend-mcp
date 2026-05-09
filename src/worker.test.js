@@ -530,7 +530,7 @@ test("runWorker persists recommend dry-run progress emitted by executor", async 
   });
 });
 
-test("runWorker leaves robustness runtime off by default", async () => {
+test("runWorker enables recover robustness runtime by default", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
   await withRuntimeHome(workspaceRoot, async () => {
     const snapshot = createRunSnapshot({
@@ -584,13 +584,15 @@ test("runWorker leaves robustness runtime off by default", async () => {
 
     const stored = readRunState(workspaceRoot, snapshot.run_id);
     assert.equal(stored.state, "completed");
-    assert.equal(Object.hasOwn(stored.result, "robustness"), false);
+    assert.equal(stored.result.robustness.mode, "recover");
+    assert.equal(stored.result.robustness.candidatesObserved, 1);
     const events = fs.readFileSync(stored.artifacts.eventsPath, "utf8")
       .trim()
       .split(/\r?\n/)
       .map((line) => JSON.parse(line));
-    assert.equal(events.some((event) => event.type === "candidate_started"), false);
-    assert.equal(fs.existsSync(stored.artifacts.checkpointPath), false);
+    assert.equal(events.some((event) => event.type === "candidate_started"), true);
+    assert.equal(events.some((event) => event.type === "candidate_finished"), true);
+    assert.equal(fs.existsSync(stored.artifacts.checkpointPath), true);
   });
 });
 
