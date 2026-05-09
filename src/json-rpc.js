@@ -44,6 +44,10 @@ import {
   requestCancel,
   requestPause
 } from "./run-state.js";
+import {
+  normalizeRobustnessMode,
+  parseHeartbeatIntervalMs
+} from "./long-run-runtime.js";
 import { isAllCandidateLimit, normalizeText, parsePositiveInteger } from "./utils.js";
 
 const currentFilePath = fileURLToPath(import.meta.url);
@@ -393,7 +397,17 @@ function createStartTool(name, kind) {
         mock_chat_post_action: { type: "string" },
         execute_request_resume: { type: "boolean" },
         allow_chat_action: { type: "boolean" },
-        allow_request_resume: { type: "boolean" }
+        allow_request_resume: { type: "boolean" },
+        robustness_mode: {
+          type: "string",
+          enum: ["off", "observe", "recover"],
+          description: "Opt-in long-run robustness layer. off preserves current behavior; observe records heartbeats/timing/checkpoints; recover is reserved for bounded recovery canaries."
+        },
+        heartbeat_interval_ms: {
+          type: "integer",
+          minimum: 5000,
+          description: "Heartbeat interval for robustness_mode observe|recover. Values below 5000ms are clamped."
+        }
       },
       required: requiredStartArgsForKind(kind),
       additionalProperties: false
@@ -722,6 +736,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         pid: worker.pid,
         state: "queued",
         workflow: input.workflow,
+        robustness_mode: input.robustness_mode,
         preflight: {
           ok: true,
           targetPage: preflight.targetPage,
@@ -923,7 +938,9 @@ function buildStartInput(kind, args = {}, defaultDebugPort = DEFAULT_DEBUG_PORT)
     ...args,
     debug_port: parsePositiveInteger(args.debug_port, defaultDebugPort),
     mock_llm: parseOptionalBooleanArg(args.mock_llm, false),
-    criteria: args.criteria || null
+    criteria: args.criteria || null,
+    robustness_mode: normalizeRobustnessMode(args.robustness_mode),
+    heartbeat_interval_ms: parseHeartbeatIntervalMs(args.heartbeat_interval_ms)
   };
   const requestedWorkflow = args.workflow || (kind === RUN_KINDS.CHAT ? RUN_WORKFLOWS.CHAT_SCREENING : null);
   if (requestedWorkflow === RUN_WORKFLOWS.CHAT_SCREENING) {

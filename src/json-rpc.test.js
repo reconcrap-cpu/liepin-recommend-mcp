@@ -40,6 +40,8 @@ test("tools/list exposes liepin-prefixed tools", async () => {
   const recommendChatTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.recommendChatStart);
   assert.equal(recommendChatTool.inputSchema.properties.allow_chat_action.type, "boolean");
   assert.equal(recommendChatTool.inputSchema.properties.allow_request_resume.type, "boolean");
+  assert.deepEqual(recommendChatTool.inputSchema.properties.robustness_mode.enum, ["off", "observe", "recover"]);
+  assert.equal(recommendChatTool.inputSchema.properties.heartbeat_interval_ms.minimum, 5000);
   assert.equal(recommendChatTool.inputSchema.properties.candidate_limit.description.includes("pass"), true);
   assert.equal(
     response.result.tools
@@ -197,6 +199,43 @@ test("recommend-chat start defaults to production click actions over JSON-RPC", 
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
   assert.equal(payload.workflow, RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN);
+  assert.equal(payload.robustness_mode, "off");
+});
+
+test("recommend-chat start accepts observe robustness mode over JSON-RPC", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
+  const previous = process.env[ENV_HOME];
+  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  try {
+    const response = await handleJsonRpc({
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: {
+        name: TOOL_NAMES.recommendChatStart,
+        arguments: {
+          mock_llm: true,
+          candidate_limit: 1,
+          robustness_mode: "observe",
+          heartbeat_interval_ms: 1000
+        }
+      }
+    }, workspaceRoot, { spawnWorker: stubWorker, runDoctorFn: okDoctor });
+    const payload = JSON.parse(response.result.content[0].text);
+    assert.equal(response.result.isError, false);
+    assert.equal(payload.status, "ACCEPTED");
+    assert.equal(payload.robustness_mode, "observe");
+    const snapshot = readRunState(workspaceRoot, payload.run_id);
+    assert.equal(snapshot.input.robustness_mode, "observe");
+    assert.equal(snapshot.input.heartbeat_interval_ms, 5000);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ENV_HOME];
+    } else {
+      process.env[ENV_HOME] = previous;
+    }
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
 });
 
 test("recommend start defaults to production chain over JSON-RPC", async () => {

@@ -87,6 +87,10 @@ import {
   runRecommendTraversalAudit,
   summarizeRecommendTraversal
 } from "./liepin/recommend-traversal.js";
+import {
+  normalizeRobustnessMode,
+  parseHeartbeatIntervalMs
+} from "./long-run-runtime.js";
 import { runCvStructureSurvey } from "./liepin/cv-survey.js";
 import { sampleRecommendDetailedResumes } from "./liepin/recommend-sampler.js";
 import {
@@ -286,6 +290,7 @@ export async function runCli(argv = process.argv.slice(2)) {
       pid: worker.pid,
       state: snapshot.state,
       workflow: input.workflow,
+      robustness_mode: input.robustness_mode,
       preflight: {
         ok: true,
         targetPage: preflight.targetPage,
@@ -923,7 +928,13 @@ function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT
     mock_post_action: normalizeText(flags["mock-post-action"] || flags.mockPostAction),
     mock_reasoning: normalizeText(flags["mock-reasoning"] || flags.mockReasoning),
     allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, false),
-    allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
+    allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false),
+    robustness_mode: normalizeRobustnessMode(
+      flags["robustness-mode"] || flags.robustnessMode || flags.robustness_mode
+    ),
+    heartbeat_interval_ms: parseHeartbeatIntervalMs(
+      flags["heartbeat-interval-ms"] || flags.heartbeatIntervalMs || flags.heartbeat_interval_ms
+    )
   };
 
   const requestedWorkflow = normalizeText(flags.workflow) || (kind === RUN_KINDS.CHAT ? RUN_WORKFLOWS.CHAT_SCREENING : null);
@@ -1147,10 +1158,10 @@ function buildHelp() {
     "  external-agent config [--output <path>]",
     "  external-agent-config [--output <path>]",
     "  provider check [--mode both|recommend|chat]",
-    "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
-    "  search start [--debug-port 9222] --profile <搜索profile> --job <岗位> --hide-read true|false [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false]",
-    "  chat start [--debug-port 9222] --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--max-chars 12000] [--mock-llm] [--allow-request-resume true|false]",
-    "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
+    "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false] [--robustness-mode off|observe|recover]",
+    "  search start [--debug-port 9222] --profile <搜索profile> --job <岗位> --hide-read true|false [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--robustness-mode off|observe|recover]",
+    "  chat start [--debug-port 9222] --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--max-chars 12000] [--mock-llm] [--allow-request-resume true|false] [--robustness-mode off|observe|recover]",
+    "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false] [--robustness-mode off|observe|recover]",
     "  runs list [--full]",
     "  runs progress [--kind recommend|search|chat|recommend-chat] [--include-completed true|false] [--limit 5] [--full]",
     "  runs status --run-id <id> [--full]",

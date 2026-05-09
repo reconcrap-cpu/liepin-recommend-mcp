@@ -49,6 +49,12 @@ export const RUN_WORKFLOWS = {
   SEARCH_CHAT_CHAIN: "search_chat_chain"
 };
 
+export const ROBUSTNESS_MODES = {
+  OFF: "off",
+  OBSERVE: "observe",
+  RECOVER: "recover"
+};
+
 export const TERMINAL_RUN_STATES = new Set([
   RUN_STATES.COMPLETED,
   RUN_STATES.FAILED,

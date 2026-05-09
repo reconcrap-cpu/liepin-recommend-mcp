@@ -54,6 +54,7 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 - **异步 run 行为**
   - `liepin_search_start` 是 async workflow。拿到 `ACCEPTED + run_id` 后默认停止本轮，不自动高频轮询。
   - 只有用户要求查进度时才调用 `liepin_run_progress`；有明确 `run_id` 时传入该 `run_id`。
+  - 用户要求长时间无人值守、鲁棒性 canary、性能对比或 heartbeat 时，传 `robustness_mode="observe"`；默认不传或传 `off` 以保持当前稳定行为。
 
 ## What The Workflow Does
 
@@ -83,7 +84,7 @@ description: "Use when users want Liepin search-page screening/outreach via @rec
 }
 ```
 
-不要传 `scan_limit`，除非用户明确要求扫描上限。
+不要传 `scan_limit`，除非用户明确要求扫描上限。不要传 `robustness_mode="observe"`，除非用户明确要做长跑鲁棒性/性能 canary。
 
 ## Response Style
 

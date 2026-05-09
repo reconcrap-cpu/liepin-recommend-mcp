@@ -33,6 +33,7 @@ description: "Use when users want chat-only screening on Liepin chat page via @r
 - 用户确认 `candidate_limit/job/unread_only/criteria` 后，必须调用 `liepin_chat_start`，严禁调用 `liepin_recommend_start` 或 `liepin_recommend_chat_start`。
 - 如果下一步准备调用的工具名不是 `liepin_chat_start`，立即停止并改为 `liepin_chat_start`。
 - 拿到 `ACCEPTED + run_id` 后默认停止本轮，不自动高频轮询；用户要求查进度时优先调用 `liepin_run_progress`，有明确 `run_id` 时传入该 `run_id`。
+- 用户要求长时间无人值守、鲁棒性 canary、性能对比或 heartbeat 时，传 `robustness_mode="observe"`；默认不传或传 `off` 以保持当前稳定行为。
 
 ## Required Inputs
 
@@ -49,6 +50,7 @@ description: "Use when users want chat-only screening on Liepin chat page via @r
 
 - `scan_limit`
 - `max_chars`
+- `robustness_mode`：仅在用户要测试长跑鲁棒性/性能 canary 时传 `"observe"`。
 
 ## Response Style
 

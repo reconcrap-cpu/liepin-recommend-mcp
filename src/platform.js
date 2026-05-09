@@ -727,6 +727,7 @@ function buildSkillExportMarkdown(payload = {}) {
     "- 启动搜索任务前先调用 `liepin_search_options`，向用户展示快捷搜索 profile 和职位选项。",
     "- 搜索任务必须确认 `profile`、`job`、`criteria`、`candidate_limit` 后再调用 `liepin_search_start`。",
     "- 搜索任务不传 `scan_limit` 时不限制扫描上限，只受目标通过人数或最后一页限制。",
+    "- 用户要求长时间无人值守、鲁棒性 canary、性能对比或 heartbeat 时，传 `robustness_mode=observe`；默认不传或传 `off` 以保持当前稳定行为。",
     "- 启动前 doctor 传 `fix=true` 与对应 `target_page`，自动安装依赖、打开 debug Chrome、导航到目标页；只有登录/风控/配置等无法自动解决的问题才请求用户帮助。",
     "- `candidate_limit` 表示目标通过人选数，不是扫描或处理人数。",
     `- External MCP target override env: \`${externalMcpTargetsEnv}\``,

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_RECOMMEND_STEP_DELAY_MS,
+  ROBUSTNESS_MODES,
   RUN_KINDS,
   RUN_WORKFLOWS
 } from "./constants.js";
@@ -49,6 +50,11 @@ import {
   runSearchChatChain,
   summarizeSearchChatChain
 } from "./liepin/search-chat-chain.js";
+import {
+  createLongRunRuntime,
+  normalizeRobustnessMode,
+  parseHeartbeatIntervalMs
+} from "./long-run-runtime.js";
 import { isAllCandidateLimit, normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
 
 export async function runWorker({
@@ -69,6 +75,15 @@ export async function runWorker({
     return;
   }
   const selectedWorkflow = normalizeText(snapshot.input?.workflow) || legacyWorkflowForKind(snapshot.kind);
+  const artifacts = snapshot.artifacts || getRunArtifactPaths(workspaceRoot, runId);
+  const robustnessRuntime = createLongRunRuntime({
+    mode: normalizeRobustnessMode(snapshot.input?.robustness_mode, ROBUSTNESS_MODES.OFF),
+    workflow: selectedWorkflow,
+    runId,
+    checkpointPath: artifacts.checkpointPath,
+    heartbeatIntervalMs: parseHeartbeatIntervalMs(snapshot.input?.heartbeat_interval_ms),
+    appendEvent: (type, payload) => appendRunEvent(snapshot, type, payload)
+  });
 
   markRunRunning(workspaceRoot, runId);
   appendRunEvent(readRunState(workspaceRoot, runId), "worker_started", {
@@ -97,6 +112,7 @@ export async function runWorker({
     }
   };
   const onProgress = (event = {}) => {
+    robustnessRuntime.observeProgress(event);
     updateRunProgress(workspaceRoot, runId, event);
     if (event.partialResult) {
       lastPartialWorkflowResult = event.partialResult;
@@ -113,34 +129,42 @@ export async function runWorker({
       markRunPaused(workspaceRoot, runId, { stage: "before_browser_work" });
       return;
     }
+    robustnessRuntime.start();
 
     const result = await executeWorkflow({
       workspaceRoot,
       snapshot,
       executors,
       onProgress,
-      onSafeControlPoint
+      onSafeControlPoint,
+      robustnessRuntime
     });
-    markRunCompleted(workspaceRoot, runId, result);
+    robustnessRuntime.stop();
+    markRunCompleted(workspaceRoot, runId, robustnessRuntime.decorateResult(result));
   } catch (error) {
     const partialWorkflowResult = error?.partialResult || lastPartialWorkflowResult || null;
     if (error?.code === "RUN_PAUSED") {
-      markRunPaused(workspaceRoot, runId, partialWorkflowResult || {
+      robustnessRuntime.stop();
+      markRunPaused(workspaceRoot, runId, robustnessRuntime.decorateResult(partialWorkflowResult || {
         reason: "paused_by_operator"
-      });
+      }));
       return;
     }
     if (error?.code === "RUN_CANCELED") {
-      markRunCanceled(workspaceRoot, runId, partialWorkflowResult || {
+      robustnessRuntime.stop();
+      markRunCanceled(workspaceRoot, runId, robustnessRuntime.decorateResult(partialWorkflowResult || {
         reason: "canceled_by_operator"
-      });
+      }));
       return;
     }
+    const robustnessFailure = robustnessRuntime.recordFailure(error);
+    robustnessRuntime.stop();
     markRunFailed(workspaceRoot, runId, {
       code: error?.code || "WORKER_UNEXPECTED_ERROR",
-      message: error?.message || "Unexpected worker error"
+      message: error?.message || "Unexpected worker error",
+      robustnessFailure
     }, {
-      workflowResult: partialWorkflowResult
+      workflowResult: robustnessRuntime.decorateResult(partialWorkflowResult)
     });
   }
 }
@@ -150,7 +174,8 @@ export async function executeWorkflow({
   snapshot,
   executors = createDefaultExecutors(),
   onProgress = null,
-  onSafeControlPoint = null
+  onSafeControlPoint = null,
+  robustnessRuntime = null
 }) {
   const input = snapshot.input || {};
   const workflow = normalizeText(input.workflow) || legacyWorkflowForKind(snapshot.kind);
@@ -334,7 +359,14 @@ export async function executeWorkflow({
       provider: llm.provider,
       checkpoint,
       onCheckpoint: async (checkpointPayload) => {
-        writeJsonFile(artifacts.checkpointPath, checkpointPayload);
+        const writer = async (payload) => {
+          writeJsonFile(artifacts.checkpointPath, payload);
+        };
+        if (robustnessRuntime?.enabled) {
+          await robustnessRuntime.recordCheckpointWrite(writer, checkpointPayload);
+          return;
+        }
+        await writer(checkpointPayload);
       },
       onSafeControlPoint,
       onProgress
