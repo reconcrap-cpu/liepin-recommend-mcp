@@ -142,22 +142,41 @@ export function readScreeningConfig(workspaceRoot = getWorkspaceRoot()) {
       ...resolution
     };
   }
+  const parsed = resolution.parsed;
   return {
     ok: true,
     config: {
-      baseUrl: normalizeText(resolution.parsed.baseUrl).replace(/\/+$/, ""),
-      apiKey: normalizeText(resolution.parsed.apiKey),
-      model: normalizeText(resolution.parsed.model),
+      baseUrl: normalizeText(parsed.baseUrl).replace(/\/+$/, ""),
+      apiKey: normalizeText(parsed.apiKey),
+      model: normalizeText(parsed.model),
       debugPort: resolveDefaultDebugPort(workspaceRoot),
       reasoningEffort: normalizeText(
-        resolution.parsed.reasoningEffort
-        || resolution.parsed.reasoning_effort
-        || resolution.parsed.llmThinkingLevel
-        || resolution.parsed.thinkingLevel
+        parsed.reasoningEffort
+        || parsed.reasoning_effort
+        || parsed.llmThinkingLevel
+        || parsed.thinkingLevel
       ) || null,
-      llmTimeoutMs: parsePositiveInteger(resolution.parsed.llmTimeoutMs, 120000),
-      llmMaxRetries: parsePositiveInteger(resolution.parsed.llmMaxRetries, 2),
-      llmSchemaMaxRetries: parsePositiveInteger(resolution.parsed.llmSchemaMaxRetries, 1)
+      reasoningEnabled: parseOptionalBoolean(firstDefined(
+        parsed.reasoningEnabled,
+        parsed.enableReasoning,
+        parsed.thinkingEnabled,
+        parsed.enableThinking,
+        parsed.llmThinkingEnabled
+      )),
+      reasoningStream: parseOptionalBoolean(firstDefined(
+        parsed.reasoningStream,
+        parsed.streamReasoning,
+        parsed.llmStream
+      )),
+      llmExtraBody: normalizeObject(firstDefined(
+        parsed.llmExtraBody,
+        parsed.extraBody,
+        parsed.providerExtraBody,
+        parsed.openaiCompatibleExtraBody
+      )),
+      llmTimeoutMs: parsePositiveInteger(parsed.llmTimeoutMs, 120000),
+      llmMaxRetries: parsePositiveInteger(parsed.llmMaxRetries, 2),
+      llmSchemaMaxRetries: parsePositiveInteger(parsed.llmSchemaMaxRetries, 1)
     },
     ...resolution
   };
@@ -177,7 +196,10 @@ export function createScreeningConfigTemplate() {
     apiKey: "replace-with-real-api-key",
     model: "your-model-name",
     debugPort: DEFAULT_DEBUG_PORT,
+    reasoningEnabled: true,
     reasoningEffort: "medium",
+    reasoningStream: true,
+    llmExtraBody: {},
     llmTimeoutMs: 120000,
     llmMaxRetries: 2
   };
@@ -209,4 +231,27 @@ export function getResearchDocPaths(workspaceRoot = getWorkspaceRoot()) {
   return Object.fromEntries(
     Object.entries(RESEARCH_FILES).map(([key, relativePath]) => [key, path.join(root, relativePath)])
   );
+}
+
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined);
+}
+
+function parseOptionalBoolean(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  const normalized = normalizeText(value).toLowerCase();
+  if (["true", "1", "yes", "y", "on", "enabled", "enable"].includes(normalized)) return true;
+  if (["false", "0", "no", "n", "off", "disabled", "disable"].includes(normalized)) return false;
+  return null;
+}
+
+function normalizeObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
 }

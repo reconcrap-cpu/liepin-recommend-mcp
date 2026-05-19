@@ -82,6 +82,33 @@ test("readScreeningConfig accepts boss-style llmThinkingLevel", () => {
   }
 });
 
+test("readScreeningConfig parses reasoning compatibility controls", () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-config-"));
+  const configDir = path.join(workspaceRoot, "config");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "screening-config.json"), JSON.stringify({
+    baseUrl: "https://example.com/v1",
+    apiKey: "sk-test",
+    model: "test-model",
+    reasoningEnabled: "true",
+    reasoningStream: "false",
+    llmExtraBody: {
+      enable_thinking: true
+    }
+  }), "utf8");
+  try {
+    const resolution = readScreeningConfig(workspaceRoot);
+    assert.equal(resolution.ok, true);
+    assert.equal(resolution.config.reasoningEnabled, true);
+    assert.equal(resolution.config.reasoningStream, false);
+    assert.deepEqual(resolution.config.llmExtraBody, {
+      enable_thinking: true
+    });
+  } finally {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("resolveDefaultDebugPort prefers screening-config debugPort", () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-config-"));
   const configDir = path.join(workspaceRoot, "config");

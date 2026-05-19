@@ -17,6 +17,8 @@ const MODE_SCHEMAS = {
   }
 };
 
+const reasoningCompatibilityDowngrades = new Map();
+
 export function buildScreeningLlmRequest({
   mode,
   screenInput,
@@ -154,10 +156,17 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
   }
   const url = `${baseUrl}${request.endpoint}`;
   const maxRetries = parseNonNegativeInteger(config?.llmMaxRetries, 2);
+  const compatibilityKey = getCompatibilityKey(config);
+  const disabledFeatures = getCompatibilityDowngrades(compatibilityKey);
   let lastError = null;
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const timeoutMs = parsePositiveInteger(config?.llmTimeoutMs, 120000);
+    const requestBody = buildOpenAiCompatibleRequestBody({
+      config,
+      request,
+      disabledFeatures
+    });
     const timer = controller
       ? setTimeout(() => controller.abort(), timeoutMs)
       : null;
@@ -168,18 +177,30 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
           "content-type": "application/json",
           authorization: `Bearer ${apiKey}`
         },
-        body: JSON.stringify({
-          model: config.model,
-          messages: request.messages,
-          temperature: request.temperature
-        }),
+        body: JSON.stringify(requestBody),
         signal: controller?.signal
       });
       if (response.ok) {
-        return response.json();
+        return isStreamResponse(response)
+          ? parseOpenAiCompatibleStream(response)
+          : response.json();
+      }
+      const responseText = await readResponseText(response);
+      const downgrade = selectCompatibilityDowngrade({
+        requestBody,
+        response,
+        responseText,
+        disabledFeatures
+      });
+      if (downgrade) {
+        disabledFeatures[downgrade] = true;
+        reasoningCompatibilityDowngrades.set(compatibilityKey, { ...disabledFeatures });
+        attempt -= 1;
+        continue;
       }
       const error = new Error(`LLM request failed: ${response.status} ${response.statusText}`);
       error.status = response.status;
+      error.body = responseText;
       lastError = error;
       if (!isRetriableStatus(response.status) || attempt >= maxRetries) {
         throw error;
@@ -194,6 +215,213 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
     }
   }
   throw lastError || new Error("LLM request failed");
+}
+
+function buildOpenAiCompatibleRequestBody({
+  config,
+  request,
+  disabledFeatures = {}
+}) {
+  const body = {
+    model: config.model,
+    messages: request.messages,
+    temperature: request.temperature
+  };
+  const reasoningEnabled = shouldRequestReasoning(config);
+  if (reasoningEnabled) {
+    const reasoningEffort = normalizeText(config?.reasoningEffort);
+    if (reasoningEffort && !disabledFeatures.reasoningEffort) {
+      body.reasoning_effort = reasoningEffort;
+    }
+    if (shouldSendThinkingToggle(config) && !disabledFeatures.thinking) {
+      body.thinking = resolveThinkingToggle(config);
+    }
+    if (shouldStreamReasoning(config) && !disabledFeatures.stream) {
+      body.stream = true;
+    }
+  }
+  return {
+    ...body,
+    ...normalizeObject(config?.llmExtraBody)
+  };
+}
+
+function shouldRequestReasoning(config) {
+  if (typeof config?.reasoningEnabled === "boolean") return config.reasoningEnabled;
+  return Boolean(normalizeText(config?.reasoningEffort) || Object.keys(normalizeObject(config?.llmExtraBody)).length);
+}
+
+function shouldStreamReasoning(config) {
+  if (typeof config?.reasoningStream === "boolean") return config.reasoningStream;
+  return true;
+}
+
+function shouldSendThinkingToggle(config) {
+  if (Object.hasOwn(normalizeObject(config?.llmExtraBody), "thinking")) return false;
+  const baseUrl = normalizeText(config?.baseUrl).toLowerCase();
+  if (baseUrl.includes("api.openai.com") || baseUrl.includes("openai.azure.com")) return false;
+  return true;
+}
+
+function resolveThinkingToggle(config) {
+  if (typeof config?.thinking === "object" && config.thinking !== null && !Array.isArray(config.thinking)) {
+    return config.thinking;
+  }
+  return { type: "enabled" };
+}
+
+function getCompatibilityKey(config) {
+  return [
+    normalizeText(config?.baseUrl).toLowerCase(),
+    normalizeText(config?.model).toLowerCase()
+  ].join("|");
+}
+
+function getCompatibilityDowngrades(key) {
+  return {
+    reasoningEffort: false,
+    thinking: false,
+    stream: false,
+    ...(reasoningCompatibilityDowngrades.get(key) || {})
+  };
+}
+
+function selectCompatibilityDowngrade({
+  requestBody,
+  response,
+  responseText,
+  disabledFeatures
+}) {
+  if (![400, 404, 415, 422].includes(response.status)) return null;
+  const detail = normalizeText(responseText || response.statusText).toLowerCase();
+  const looksLikeParameterError = !detail || /unknown|unrecognized|unsupported|invalid|parameter|argument|field|extra|stream|thinking|reasoning|effort/u.test(detail);
+  if (!looksLikeParameterError) return null;
+  if (/thinking/u.test(detail) && requestBody.thinking && !disabledFeatures.thinking) return "thinking";
+  if (/stream|sse/u.test(detail) && requestBody.stream === true && !disabledFeatures.stream) return "stream";
+  if (/reasoning|effort/u.test(detail) && requestBody.reasoning_effort && !disabledFeatures.reasoningEffort) {
+    return "reasoningEffort";
+  }
+  if (requestBody.thinking && !disabledFeatures.thinking) return "thinking";
+  if (requestBody.stream === true && !disabledFeatures.stream) return "stream";
+  if (requestBody.reasoning_effort && !disabledFeatures.reasoningEffort) return "reasoningEffort";
+  return null;
+}
+
+function isStreamResponse(response) {
+  const contentType = normalizeText(response?.headers?.get?.("content-type")).toLowerCase();
+  return contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson");
+}
+
+async function parseOpenAiCompatibleStream(response) {
+  const text = await readResponseText(response);
+  const chunks = parseStreamChunks(text);
+  if (chunks.length === 0) return JSON.parse(text);
+  return assembleStreamedChatCompletion(chunks);
+}
+
+function parseStreamChunks(text) {
+  const chunks = [];
+  const blocks = String(text || "").split(/\r?\n\r?\n/u);
+  for (const block of blocks) {
+    const dataLines = block
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.replace(/^data:\s*/u, ""));
+    if (dataLines.length === 0) continue;
+    const data = dataLines.join("\n").trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      chunks.push(JSON.parse(data));
+    } catch {
+      // Ignore keepalive or provider-specific non-JSON stream events.
+    }
+  }
+  if (chunks.length > 0) return chunks;
+  for (const line of String(text || "").split(/\r?\n/u)) {
+    const data = line.trim().replace(/^data:\s*/u, "");
+    if (!data || data === "[DONE]") continue;
+    try {
+      chunks.push(JSON.parse(data));
+    } catch {
+      // Ignore non-JSON lines.
+    }
+  }
+  return chunks;
+}
+
+function assembleStreamedChatCompletion(chunks) {
+  const content = [];
+  const reasoning = [];
+  let finishReason = null;
+  let usage = null;
+  let model = null;
+  for (const chunk of chunks) {
+    if (!model && chunk?.model) model = chunk.model;
+    if (chunk?.usage) usage = chunk.usage;
+    collectResponseApiStreamText(chunk, { content, reasoning });
+    const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+    for (const choice of choices) {
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      collectChatChoiceText(choice, { content, reasoning });
+    }
+  }
+  return {
+    object: "chat.completion",
+    model,
+    choices: [
+      {
+        index: 0,
+        finish_reason: finishReason,
+        message: {
+          role: "assistant",
+          content: content.join(""),
+          reasoning_content: reasoning.join("")
+        }
+      }
+    ],
+    usage
+  };
+}
+
+function collectChatChoiceText(choice, target) {
+  const delta = choice?.delta || {};
+  const message = choice?.message || {};
+  collectStreamNestedText(delta.content, target.content);
+  collectStreamNestedText(message.content, target.content);
+  collectStreamNestedText(choice?.reasoning_content, target.reasoning);
+  collectStreamNestedText(choice?.reasoning, target.reasoning);
+  collectStreamNestedText(delta.reasoning_content, target.reasoning);
+  collectStreamNestedText(delta.reasoningContent, target.reasoning);
+  collectStreamNestedText(delta.reasoning, target.reasoning);
+  collectStreamNestedText(message.reasoning_content, target.reasoning);
+  collectStreamNestedText(message.reasoningContent, target.reasoning);
+  collectStreamNestedText(message.reasoning, target.reasoning);
+}
+
+function collectResponseApiStreamText(chunk, target) {
+  const type = normalizeText(chunk?.type).toLowerCase();
+  if (type.includes("reasoning")) {
+    collectStreamNestedText(chunk?.delta, target.reasoning);
+    collectStreamNestedText(chunk?.text, target.reasoning);
+    collectStreamNestedText(chunk?.summary, target.reasoning);
+  }
+  if (type.includes("output_text") || type.includes("content_part")) {
+    collectStreamNestedText(chunk?.delta, target.content);
+    collectStreamNestedText(chunk?.text, target.content);
+  }
+  collectStreamNestedText(chunk?.reasoning_content, target.reasoning);
+  collectStreamNestedText(chunk?.reasoningContent, target.reasoning);
+  collectStreamNestedText(chunk?.reasoning, target.reasoning);
+}
+
+async function readResponseText(response) {
+  if (typeof response?.text !== "function") return "";
+  try {
+    return await response.text();
+  } catch {
+    return "";
+  }
 }
 
 function extractResponseContent(response) {
@@ -247,8 +475,17 @@ function collectNativeReasoning(value, out = [], depth = 0, keyHint = "") {
     "reasoning",
     "reasoning_content",
     "reasoningContent",
+    "reasoning_details",
+    "reasoningDetails",
+    "reasoning_summary",
+    "reasoningSummary",
     "rawReasoningText",
-    "raw_reasoning_text"
+    "raw_reasoning_text",
+    "thinking",
+    "thinking_content",
+    "thinkingContent",
+    "thought",
+    "thoughts"
   ];
   for (const key of directKeys) {
     if (Object.hasOwn(value, key)) {
@@ -262,12 +499,16 @@ function collectNativeReasoning(value, out = [], depth = 0, keyHint = "") {
     collectNestedText(choice?.reasoning_content, out);
     collectNestedText(choice?.message?.reasoning, out);
     collectNestedText(choice?.message?.reasoning_content, out);
+    collectNestedText(choice?.message?.reasoningContent, out);
+    collectNestedText(choice?.message?.thinking, out);
+    collectNestedText(choice?.message?.thinking_content, out);
+    collectNestedText(choice?.message?.thoughts, out);
   }
 
   const output = Array.isArray(value.output) ? value.output : [];
   for (const item of output) {
     const itemType = normalizeText(item?.type).toLowerCase();
-    if (itemType === "reasoning" || itemType === "reasoning_content") {
+    if (itemType === "reasoning" || itemType === "reasoning_content" || itemType === "thinking") {
       collectNestedText(item, out);
     }
   }
@@ -286,15 +527,61 @@ function collectNestedText(value, out = [], depth = 0) {
     return out;
   }
   if (typeof value === "object") {
-    for (const key of ["text", "content", "summary_text", "summary", "reasoning_content", "reasoning"]) {
+    for (const key of [
+      "text",
+      "content",
+      "summary_text",
+      "summary",
+      "reasoning_content",
+      "reasoningContent",
+      "reasoning",
+      "thinking_content",
+      "thinkingContent",
+      "thinking",
+      "thought",
+      "thoughts"
+    ]) {
       if (Object.hasOwn(value, key)) collectNestedText(value[key], out, depth + 1);
     }
   }
   return out;
 }
 
+function collectStreamNestedText(value, out = [], depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return out;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    const text = String(value);
+    if (text) out.push(text);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStreamNestedText(item, out, depth + 1);
+    return out;
+  }
+  if (typeof value === "object") {
+    for (const key of [
+      "text",
+      "content",
+      "summary_text",
+      "summary",
+      "delta",
+      "reasoning_content",
+      "reasoningContent",
+      "reasoning",
+      "thinking_content",
+      "thinkingContent",
+      "thinking",
+      "thought",
+      "thoughts"
+    ]) {
+      if (Object.hasOwn(value, key)) collectStreamNestedText(value[key], out, depth + 1);
+    }
+  }
+  return out;
+}
+
 function isReasoningKey(key) {
-  return /reasoning|reasoning_content|raw_reasoning|rawReasoning/u.test(String(key || ""));
+  return /reasoning|reasoning_content|raw_reasoning|rawReasoning|thinking|thought/u.test(String(key || ""));
 }
 
 function normalizeDecision(content, mode) {
@@ -470,4 +757,10 @@ function parsePositiveInteger(value, fallback) {
 function parseNonNegativeInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function normalizeObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
 }
