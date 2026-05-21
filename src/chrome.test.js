@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 
 import {
   CdpPageClient,
+  buildChromeDebugLaunchArgs,
   classifyLiepinPage,
+  ensureChromeDebugPort,
   findChromeExecutable,
   getLiepinTargetUrl,
+  getMissingRequiredChromeFlags,
   isCdpRuntimeTimeoutError,
   isLiepinRiskPageUrl,
-  MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS
+  MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS,
+  REQUIRED_CHROME_DEBUG_FLAGS
 } from "./chrome.js";
 
 test("classifyLiepinPage detects Liepin risk captcha before normal pages", () => {
@@ -41,6 +45,197 @@ test("findChromeExecutable honors explicit Chrome env paths", () => {
   });
 
   assert.equal(executable, "C:\\Chrome\\chrome.exe");
+});
+
+test("buildChromeDebugLaunchArgs includes required flags once", () => {
+  const args = buildChromeDebugLaunchArgs({
+    port: 9555,
+    userDataDir: "C:\\tmp\\liepin-profile-9555",
+    url: "https://lpt.liepin.com/recommend",
+    extraArgs: [
+      ...REQUIRED_CHROME_DEBUG_FLAGS,
+      "--disable-features=Foo"
+    ]
+  });
+
+  for (const flag of REQUIRED_CHROME_DEBUG_FLAGS) {
+    if (flag.startsWith("--disable-features=")) {
+      const disableFeatureArgs = args.filter((arg) => arg.startsWith("--disable-features="));
+      assert.equal(disableFeatureArgs.length, 1);
+      assert.equal(disableFeatureArgs[0].includes("CalculateNativeWinOcclusion"), true);
+      assert.equal(disableFeatureArgs[0].includes("Foo"), true);
+    } else {
+      assert.equal(args.filter((arg) => arg === flag).length, 1);
+    }
+  }
+  assert.deepEqual(getMissingRequiredChromeFlags(args), []);
+});
+
+test("getMissingRequiredChromeFlags detects shadowed disable-features switches", () => {
+  assert.deepEqual(
+    getMissingRequiredChromeFlags([
+      "--remote-debugging-port=9223",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+      "--disable-features=CalculateNativeWinOcclusion"
+    ]),
+    []
+  );
+  assert.deepEqual(
+    getMissingRequiredChromeFlags([
+      "--remote-debugging-port=9223",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--disable-features=Foo"
+    ]),
+    ["--disable-features=CalculateNativeWinOcclusion"]
+  );
+});
+
+test("ensureChromeDebugPort launches when port is unreachable", async () => {
+  let launched = false;
+  const result = await ensureChromeDebugPort({
+    port: 9556,
+    url: "https://lpt.liepin.com/search",
+    userDataDir: "C:\\tmp\\liepin-profile-9556",
+    _deps: {
+      async connectToChromeImpl() {
+        return {
+          ok: false,
+          error: { code: "CHROME_CONNECT_FAILED", message: "unreachable" }
+        };
+      },
+      async launchChromeDebugImpl(params) {
+        launched = true;
+        return {
+          ok: true,
+          port: params.port,
+          userDataDir: params.userDataDir,
+          launchArgs: buildChromeDebugLaunchArgs(params)
+        };
+      }
+    }
+  });
+
+  assert.equal(launched, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.launched, true);
+  assert.equal(result.requiredFlagsOk, true);
+  assert.equal(result.relaunch.reason, "chrome_unreachable");
+});
+
+test("ensureChromeDebugPort reuses compliant Chrome", async () => {
+  const result = await ensureChromeDebugPort({
+    port: 9557,
+    _deps: {
+      async connectToChromeImpl() {
+        return { ok: true, port: 9557 };
+      },
+      async inspectChromeDebugCommandLineImpl() {
+        return {
+          ok: true,
+          source: "process_list",
+          arguments: [
+            "--remote-debugging-port=9557",
+            ...REQUIRED_CHROME_DEBUG_FLAGS
+          ],
+          processes: [{ pid: 1234 }]
+        };
+      },
+      async launchChromeDebugImpl() {
+        throw new Error("should not launch");
+      }
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.reused, true);
+  assert.equal(result.replaced, false);
+  assert.deepEqual(result.missingFlags, []);
+});
+
+test("ensureChromeDebugPort replaces noncompliant local Chrome", async () => {
+  let closed = false;
+  let launched = false;
+  const result = await ensureChromeDebugPort({
+    port: 9558,
+    url: "https://lpt.liepin.com/chat/im",
+    userDataDir: "C:\\tmp\\liepin-profile-9558",
+    _deps: {
+      async connectToChromeImpl() {
+        return { ok: true, port: 9558 };
+      },
+      async inspectChromeDebugCommandLineImpl() {
+        return {
+          ok: true,
+          source: "process_list",
+          arguments: ["--remote-debugging-port=9558"],
+          processes: [{ pid: 2222 }]
+        };
+      },
+      async closeChromeDebugInstanceImpl(params) {
+        closed = true;
+        assert.deepEqual(params.processes, [{ pid: 2222 }]);
+        return { ok: true, method: "Browser.close" };
+      },
+      async launchChromeDebugImpl(params) {
+        launched = true;
+        return {
+          ok: true,
+          port: params.port,
+          userDataDir: params.userDataDir,
+          launchArgs: buildChromeDebugLaunchArgs(params)
+        };
+      }
+    }
+  });
+
+  assert.equal(closed, true);
+  assert.equal(launched, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.replaced, true);
+  assert.equal(result.closeMethod, "Browser.close");
+  assert.deepEqual(result.missingFlags, REQUIRED_CHROME_DEBUG_FLAGS);
+});
+
+test("ensureChromeDebugPort replaces unknown local Chrome flags", async () => {
+  let closed = false;
+  const result = await ensureChromeDebugPort({
+    port: 9559,
+    _deps: {
+      async connectToChromeImpl() {
+        return { ok: true, port: 9559 };
+      },
+      async inspectChromeDebugCommandLineImpl() {
+        return {
+          ok: false,
+          source: "process_list",
+          arguments: [],
+          processes: [],
+          error: "cannot prove flags"
+        };
+      },
+      async closeChromeDebugInstanceImpl() {
+        closed = true;
+        return { ok: true, method: "Browser.close" };
+      },
+      async launchChromeDebugImpl(params) {
+        return {
+          ok: true,
+          port: params.port,
+          launchArgs: buildChromeDebugLaunchArgs(params)
+        };
+      }
+    }
+  });
+
+  assert.equal(closed, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.replaced, true);
+  assert.equal(result.commandLineError, "cannot prove flags");
 });
 
 test("bringToFront is suppressed to keep Chrome in the background", async () => {

@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_DEBUG_PORT } from "./constants.js";
 import {
+  ensureChromeDebugPort,
   ensureLiepinTargetPage,
   getLiepinTargetUrl,
-  launchChromeDebug
 } from "./chrome.js";
 import {
   ensureRuntimeLayout,
@@ -100,21 +100,58 @@ export async function runDoctor({
     }
   }
 
-  let chrome = await runChromeDiscovery({ port });
-  if (shouldFix && !chrome.ok) {
-    const launch = await launchChromeDebug({
+  let chromeGuard = null;
+  let chrome = null;
+  if (shouldFix) {
+    chromeGuard = await ensureChromeDebugPort({
       port,
       url: getLiepinTargetUrl(resolvedTargetPage),
       userDataDir: path.join(layout.stateHome, `chrome-debug-profile-${port}`)
     });
-    fixes.push({
-      key: "chrome_debug",
-      ok: launch.ok,
-      changed: launch.ok,
-      port,
-      targetPage: resolvedTargetPage,
-      ...launch
-    });
+    if (chromeGuard.launched || chromeGuard.replaced || !chromeGuard.ok) {
+      fixes.push({
+        key: chromeGuard.replaced ? "chrome_required_flags" : "chrome_debug",
+        ok: chromeGuard.ok,
+        changed: Boolean(chromeGuard.launched || chromeGuard.replaced),
+        port,
+        targetPage: resolvedTargetPage,
+        chromeGuard
+      });
+    }
+    chrome = await runChromeDiscovery({ port });
+  } else {
+    chrome = await runChromeDiscovery({ port });
+    if (chrome.ok) {
+      chromeGuard = await ensureChromeDebugPort({
+        port,
+        url: getLiepinTargetUrl(resolvedTargetPage),
+        launchIfMissing: false,
+        autoReplace: false
+      });
+    }
+  }
+
+  checks.push({
+    key: "chrome_required_flags",
+    ok: Boolean(chromeGuard?.requiredFlagsOk),
+    requiredFlags: chromeGuard?.requiredFlags || [],
+    missingFlags: chromeGuard?.missingFlags || [],
+    replaced: Boolean(chromeGuard?.replaced),
+    launched: Boolean(chromeGuard?.launched),
+    closeMethod: chromeGuard?.closeMethod || null,
+    relaunch: chromeGuard?.relaunch || null,
+    message: chromeGuard?.requiredFlagsOk
+      ? chromeGuard.replaced
+        ? `Chrome ${port} 缺少必需 flags，已自动关闭并用正确 flags 重新启动。`
+        : chromeGuard.launched
+          ? `Chrome ${port} 已用必需 flags 启动。`
+          : `Chrome ${port} 已确认包含必需 flags。`
+      : chromeGuard
+        ? `Chrome ${port} 未确认包含必需 flags：${chromeGuard.missingFlags?.join(", ") || chromeGuard.error?.message || chromeGuard.reason || "unknown"}`
+        : `Chrome ${port} 未确认包含必需 flags。`
+  });
+
+  if (shouldFix && !chrome.ok && chromeGuard?.ok) {
     chrome = await runChromeDiscovery({ port });
   }
 
@@ -197,7 +234,8 @@ export async function runDoctor({
     screenConfigPath: getScreeningConfigResolution(workspaceRoot).configPath,
     providerCheck: providerCheckResult,
     targetPage: resolvedTargetPage,
-    chrome: chrome.ok ? chrome : { ok: false, error: chrome.error }
+    chrome: chrome.ok ? chrome : { ok: false, error: chrome.error },
+    chromeGuard
   };
 }
 
@@ -249,6 +287,15 @@ export function buildDoctorRecommendations({
       severity: "error",
       message: `Start Chrome with remote debugging on port ${port}.`,
       command: `chrome --remote-debugging-port=${port}`
+    });
+  }
+  const chromeFlagsCheck = byKey.get("chrome_required_flags");
+  if (chrome?.ok && chromeFlagsCheck?.ok === false) {
+    recommendations.push({
+      code: "FIX_CHROME_REQUIRED_FLAGS",
+      severity: "error",
+      message: `Chrome ${port} is reachable but was not launched with Liepin MCP required anti-throttling flags.`,
+      command: `node src/cli.js doctor --fix --target-page ${normalizeDoctorTargetPage(targetPage, requireChatPage)} --debug-port ${port}`
     });
   }
   if (chrome?.ok && chrome.riskBlocked) {

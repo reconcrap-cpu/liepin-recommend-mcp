@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,12 @@ import { normalizeText, parsePositiveInteger, sleep } from "./utils.js";
 
 export const DEFAULT_CDP_CALL_TIMEOUT_MS = 30000;
 export const MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS = 1000;
+export const REQUIRED_CHROME_DEBUG_FLAGS = [
+  "--disable-backgrounding-occluded-windows",
+  "--disable-background-timer-throttling",
+  "--disable-renderer-backgrounding",
+  "--disable-features=CalculateNativeWinOcclusion"
+];
 
 export async function connectToChrome({ port = DEFAULT_DEBUG_PORT } = {}) {
   const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
@@ -141,7 +147,8 @@ export async function launchChromeDebug({
   url = LIEPIN_URLS.recommend,
   userDataDir = null,
   chromePath = null,
-  waitTimeoutMs = 15000
+  waitTimeoutMs = 15000,
+  extraArgs = []
 } = {}) {
   const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
   const executablePath = chromePath || findChromeExecutable();
@@ -156,13 +163,12 @@ export async function launchChromeDebug({
     };
   }
   const resolvedUserDataDir = userDataDir || path.join(os.homedir(), ".liepin-recommend-mcp", `chrome-debug-profile-${resolvedPort}`);
-  const args = [
-    `--remote-debugging-port=${resolvedPort}`,
-    `--user-data-dir=${resolvedUserDataDir}`,
-    "--no-first-run",
-    "--no-default-browser-check"
-  ];
-  if (normalizeText(url)) args.push(url);
+  const args = buildChromeDebugLaunchArgs({
+    port: resolvedPort,
+    userDataDir: resolvedUserDataDir,
+    url,
+    extraArgs
+  });
   try {
     fs.mkdirSync(resolvedUserDataDir, { recursive: true });
     const child = spawn(executablePath, args, {
@@ -181,6 +187,7 @@ export async function launchChromeDebug({
       pid: child.pid,
       executablePath,
       userDataDir: resolvedUserDataDir,
+      launchArgs: args,
       error: connection.ok ? null : connection.error
     };
   } catch (error) {
@@ -189,12 +196,578 @@ export async function launchChromeDebug({
       port: resolvedPort,
       executablePath,
       userDataDir: resolvedUserDataDir,
+      launchArgs: args,
       error: {
         code: "CHROME_LAUNCH_FAILED",
         message: error?.message || String(error)
       }
     };
   }
+}
+
+export function buildChromeDebugLaunchArgs({
+  port = DEFAULT_DEBUG_PORT,
+  userDataDir,
+  url = LIEPIN_URLS.recommend,
+  extraArgs = []
+} = {}) {
+  const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
+  const args = [
+    `--remote-debugging-port=${resolvedPort}`,
+    userDataDir ? `--user-data-dir=${userDataDir}` : null,
+    "--no-first-run",
+    "--no-default-browser-check",
+    ...REQUIRED_CHROME_DEBUG_FLAGS,
+    ...parseChromeExtraArgs(process.env.LIEPIN_EXTRA_CHROME_ARGS),
+    ...extraArgs
+  ];
+  if (normalizeText(url)) args.push(url);
+  return normalizeChromeLaunchArgs(args);
+}
+
+function parseChromeExtraArgs(value = "") {
+  return String(value || "")
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function parseChromeCommandLineArgs(commandLineOrArgs = []) {
+  if (Array.isArray(commandLineOrArgs)) {
+    return commandLineOrArgs
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+  }
+  const text = String(commandLineOrArgs || "").trim();
+  if (!text) return [];
+  const args = [];
+  let current = "";
+  let quote = null;
+  for (const char of text) {
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) args.push(current);
+  return args;
+}
+
+function splitChromeFeatureList(value = "") {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function chromeFlagIsPresent(args, requiredFlag) {
+  if (!requiredFlag) return true;
+  const disableFeaturesPrefix = "--disable-features=";
+  if (requiredFlag.startsWith(disableFeaturesPrefix)) {
+    const requiredFeatures = splitChromeFeatureList(requiredFlag.slice(disableFeaturesPrefix.length));
+    const disableFeatureArgs = args.filter((arg) => arg.startsWith(disableFeaturesPrefix));
+    const lastDisableFeatureArg = disableFeatureArgs[disableFeatureArgs.length - 1] || "";
+    const features = splitChromeFeatureList(lastDisableFeatureArg.slice(disableFeaturesPrefix.length));
+    return requiredFeatures.every((feature) => features.includes(feature));
+  }
+  return args.includes(requiredFlag);
+}
+
+export function getMissingRequiredChromeFlags(
+  commandLineOrArgs = [],
+  requiredFlags = REQUIRED_CHROME_DEBUG_FLAGS
+) {
+  const args = parseChromeCommandLineArgs(commandLineOrArgs);
+  return requiredFlags.filter((flag) => !chromeFlagIsPresent(args, flag));
+}
+
+function normalizeChromeLaunchArgs(args = []) {
+  const disableFeaturesPrefix = "--disable-features=";
+  const result = [];
+  const seen = new Set();
+  const disabledFeatures = [];
+  const disabledFeatureSet = new Set();
+  let disabledFeatureIndex = -1;
+
+  for (const rawArg of args) {
+    const arg = String(rawArg || "").trim();
+    if (!arg) continue;
+    if (arg.startsWith(disableFeaturesPrefix)) {
+      if (disabledFeatureIndex < 0) {
+        disabledFeatureIndex = result.length;
+        result.push(null);
+      }
+      for (const feature of splitChromeFeatureList(arg.slice(disableFeaturesPrefix.length))) {
+        if (!disabledFeatureSet.has(feature)) {
+          disabledFeatureSet.add(feature);
+          disabledFeatures.push(feature);
+        }
+      }
+      continue;
+    }
+    if (seen.has(arg)) continue;
+    seen.add(arg);
+    result.push(arg);
+  }
+
+  return result.map((arg) => (
+    arg === null
+      ? `${disableFeaturesPrefix}${disabledFeatures.join(",")}`
+      : arg
+  ));
+}
+
+export async function ensureChromeDebugPort({
+  port = DEFAULT_DEBUG_PORT,
+  url = LIEPIN_URLS.recommend,
+  userDataDir = null,
+  launchIfMissing = true,
+  autoReplace = true,
+  waitTimeoutMs = 15000,
+  _deps = {}
+} = {}) {
+  const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
+  const connectToChromeImpl = _deps.connectToChromeImpl || connectToChrome;
+  const inspectCommandLineImpl = _deps.inspectChromeDebugCommandLineImpl || inspectChromeDebugCommandLine;
+  const closeChromeDebugInstanceImpl = _deps.closeChromeDebugInstanceImpl || closeChromeDebugInstance;
+  const launchChromeDebugImpl = _deps.launchChromeDebugImpl || launchChromeDebug;
+  const base = {
+    ok: false,
+    port: resolvedPort,
+    guardChecked: true,
+    requiredFlags: REQUIRED_CHROME_DEBUG_FLAGS,
+    missingFlags: [],
+    requiredFlagsOk: false,
+    reused: false,
+    launched: false,
+    replaced: false,
+    closeMethod: null,
+    relaunch: null
+  };
+
+  const connection = await connectToChromeImpl({ port: resolvedPort });
+  if (!connection.ok) {
+    if (!launchIfMissing) {
+      return {
+        ...base,
+        reason: "chrome_unreachable",
+        error: connection.error
+      };
+    }
+    const launch = await launchChromeDebugImpl({
+      port: resolvedPort,
+      url,
+      userDataDir,
+      waitTimeoutMs
+    });
+    return {
+      ...base,
+      ok: Boolean(launch.ok),
+      requiredFlagsOk: Boolean(launch.ok),
+      launched: Boolean(launch.ok),
+      reason: "chrome_unreachable",
+      relaunch: summarizeChromeLaunch(launch, "chrome_unreachable"),
+      launch
+    };
+  }
+
+  const commandLine = await inspectCommandLineImpl({ port: resolvedPort, _deps });
+  const missingFlags = commandLine?.ok
+    ? getMissingRequiredChromeFlags(commandLine.arguments)
+    : REQUIRED_CHROME_DEBUG_FLAGS.slice();
+  const evidence = {
+    commandLineSource: commandLine?.source || "unknown",
+    commandLineError: commandLine?.ok ? null : commandLine?.error || "Chrome command line could not be inspected",
+    commandLineArgsCount: Array.isArray(commandLine?.arguments) ? commandLine.arguments.length : 0,
+    inspectedProcess: commandLine?.process || null,
+    inspectedProcesses: commandLine?.processes || []
+  };
+  if (missingFlags.length === 0) {
+    return {
+      ...base,
+      ...evidence,
+      ok: true,
+      requiredFlagsOk: true,
+      reused: true
+    };
+  }
+  if (!autoReplace) {
+    return {
+      ...base,
+      ...evidence,
+      ok: false,
+      reason: commandLine?.ok ? "missing_required_flags" : "unknown_required_flags",
+      missingFlags
+    };
+  }
+
+  const closeResult = await closeChromeDebugInstanceImpl({
+    port: resolvedPort,
+    processes: commandLine?.processes || [],
+    _deps
+  });
+  if (!closeResult?.ok) {
+    return {
+      ...base,
+      ...evidence,
+      reason: "replace_close_failed",
+      missingFlags,
+      closeMethod: closeResult?.method || null,
+      closeResult,
+      error: {
+        code: "CHROME_REQUIRED_FLAGS_REPLACE_FAILED",
+        message: closeResult?.error || "Failed to close Chrome debug instance"
+      }
+    };
+  }
+  const launch = await launchChromeDebugImpl({
+    port: resolvedPort,
+    url,
+    userDataDir,
+    waitTimeoutMs
+  });
+  return {
+    ...base,
+    ...evidence,
+    ok: Boolean(launch.ok),
+    requiredFlagsOk: Boolean(launch.ok),
+    reason: "missing_required_flags",
+    missingFlags,
+    replaced: Boolean(launch.ok),
+    closeMethod: closeResult.method || null,
+    closeResult,
+    relaunch: summarizeChromeLaunch(launch, "missing_required_flags"),
+    launch,
+    error: launch.ok ? null : launch.error
+  };
+}
+
+export async function inspectChromeDebugCommandLine({
+  port = DEFAULT_DEBUG_PORT,
+  _deps = {}
+} = {}) {
+  const inspectViaCdp = _deps.inspectChromeCommandLineViaCdpImpl || inspectChromeCommandLineViaCdp;
+  const inspectViaProcess = _deps.inspectChromeCommandLineViaProcessListImpl || inspectChromeCommandLineViaProcessList;
+  const cdpResult = await inspectViaCdp({ port });
+  if (cdpResult?.ok && cdpResult.arguments?.length) return cdpResult;
+  const processResult = await inspectViaProcess({ port });
+  if (processResult?.ok && processResult.arguments?.length) {
+    return {
+      ...processResult,
+      cdpError: cdpResult?.error || null
+    };
+  }
+  return {
+    ok: false,
+    source: processResult?.source || cdpResult?.source || "unknown",
+    arguments: [],
+    processes: processResult?.processes || [],
+    error: processResult?.error || cdpResult?.error || "Chrome command line could not be inspected"
+  };
+}
+
+async function inspectChromeCommandLineViaCdp({ port = DEFAULT_DEBUG_PORT } = {}) {
+  const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
+  const connection = await connectToChrome({ port: resolvedPort });
+  const wsUrl = connection.version?.webSocketDebuggerUrl;
+  if (!connection.ok || !wsUrl) {
+    return {
+      ok: false,
+      source: "cdp_browser_command_line",
+      arguments: [],
+      error: connection.error?.message || "Browser websocket URL is unavailable"
+    };
+  }
+  const client = new CdpPageClient(wsUrl);
+  try {
+    await client.connect();
+    const result = await client.send("Browser.getBrowserCommandLine", {}, { timeoutMs: 3000 });
+    const args = parseChromeCommandLineArgs(result?.arguments || []);
+    return args.length > 0
+      ? { ok: true, source: "cdp_browser_command_line", arguments: args }
+      : {
+          ok: false,
+          source: "cdp_browser_command_line",
+          arguments: [],
+          error: "Browser.getBrowserCommandLine returned no command-line arguments"
+        };
+  } catch (error) {
+    return {
+      ok: false,
+      source: "cdp_browser_command_line",
+      arguments: [],
+      error: error?.message || String(error)
+    };
+  } finally {
+    await client.disconnect().catch(() => null);
+  }
+}
+
+async function inspectChromeCommandLineViaProcessList({ port = DEFAULT_DEBUG_PORT } = {}) {
+  const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
+  if (process.platform === "win32") {
+    const portPattern = `--remote-debugging-port(=|\\s+)${resolvedPort}(\\s|$)`;
+    const script = [
+      "$items = Get-CimInstance Win32_Process",
+      `| Where-Object { $_.CommandLine -and $_.CommandLine -match '${portPattern}' }`,
+      "| Select-Object ProcessId,CommandLine;",
+      "$items | ConvertTo-Json -Compress"
+    ].join(" ");
+    const raw = await execFileText("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      script
+    ], { timeoutMs: 6000 });
+    if (!raw.ok) {
+      return {
+        ok: false,
+        source: "process_list",
+        arguments: [],
+        processes: [],
+        error: raw.error || raw.stderr || "Failed to inspect Windows process list"
+      };
+    }
+    try {
+      const processes = parseWindowsProcessListJson(raw.stdout);
+      return commandLineResultFromProcesses(processes, resolvedPort);
+    } catch (error) {
+      return {
+        ok: false,
+        source: "process_list",
+        arguments: [],
+        processes: [],
+        error: `Failed to parse Windows process list: ${error?.message || error}`
+      };
+    }
+  }
+
+  const psArgs = process.platform === "darwin"
+    ? ["-axo", "pid=,command="]
+    : ["-eo", "pid=,args="];
+  const raw = await execFileText("ps", psArgs, { timeoutMs: 6000 });
+  if (!raw.ok) {
+    return {
+      ok: false,
+      source: "process_list",
+      arguments: [],
+      processes: [],
+      error: raw.error || raw.stderr || "Failed to inspect process list"
+    };
+  }
+  return commandLineResultFromProcesses(parsePosixProcessList(raw.stdout, resolvedPort), resolvedPort);
+}
+
+function commandLineResultFromProcesses(processes = [], port = DEFAULT_DEBUG_PORT) {
+  if (processes.length === 0) {
+    return {
+      ok: false,
+      source: "process_list",
+      arguments: [],
+      processes: [],
+      error: `No local process was found for --remote-debugging-port=${port}`
+    };
+  }
+  const primary = processes[0];
+  return {
+    ok: true,
+    source: "process_list",
+    arguments: parseChromeCommandLineArgs(primary.command_line),
+    process: {
+      pid: primary.pid,
+      command_line_length: primary.command_line.length
+    },
+    processes: summarizeChromeProcesses(processes)
+  };
+}
+
+function parseWindowsProcessListJson(text = "") {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return [];
+  const parsed = JSON.parse(trimmed);
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+  return items
+    .map((item) => ({
+      pid: Number(item?.ProcessId),
+      command_line: String(item?.CommandLine || "")
+    }))
+    .filter((item) => Number.isFinite(item.pid) && item.command_line);
+}
+
+function parsePosixProcessList(text = "", port = DEFAULT_DEBUG_PORT) {
+  const portPattern = new RegExp(`--remote-debugging-port(?:=|\\s+)${port}(?=\\s|$)`);
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => {
+      const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+      return match
+        ? { pid: Number(match[1]), command_line: match[2] }
+        : null;
+    })
+    .filter((item) => item && Number.isFinite(item.pid) && portPattern.test(item.command_line));
+}
+
+function summarizeChromeProcesses(processes = []) {
+  return processes
+    .map((item) => ({
+      pid: item.pid,
+      command_line_length: String(item.command_line || "").length
+    }))
+    .filter((item) => Number.isFinite(item.pid));
+}
+
+export async function closeChromeDebugInstance({
+  port = DEFAULT_DEBUG_PORT,
+  processes = [],
+  timeoutMs = 8000,
+  pollMs = 300,
+  _deps = {}
+} = {}) {
+  const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
+  const waitClosed = _deps.waitForChromeDebugPortClosedImpl || waitForChromeDebugPortClosed;
+  let browserCloseAttempted = false;
+  let browserCloseError = null;
+  try {
+    const connection = await connectToChrome({ port: resolvedPort });
+    const wsUrl = connection.version?.webSocketDebuggerUrl;
+    if (!connection.ok || !wsUrl) {
+      throw new Error(connection.error?.message || "Browser websocket URL is unavailable");
+    }
+    const client = new CdpPageClient(wsUrl);
+    try {
+      await client.connect();
+      browserCloseAttempted = true;
+      await client.send("Browser.close", {}, { timeoutMs: 3000 });
+    } finally {
+      await client.disconnect().catch(() => null);
+    }
+  } catch (error) {
+    browserCloseError = error?.message || String(error);
+  }
+
+  let closed = await waitClosed({ port: resolvedPort, timeoutMs, pollMs });
+  if (closed.ok) {
+    return {
+      ok: true,
+      method: browserCloseAttempted ? "Browser.close" : "port_already_closed",
+      elapsed_ms: closed.elapsed_ms,
+      browserCloseError
+    };
+  }
+
+  const pids = Array.from(new Set((processes || [])
+    .map((item) => Number(item?.pid))
+    .filter((pid) => Number.isFinite(pid) && pid > 0 && pid !== process.pid)));
+  const killedPids = [];
+  const processErrors = [];
+  for (const pid of pids) {
+    try {
+      process.kill(pid);
+      killedPids.push(pid);
+    } catch (error) {
+      processErrors.push({
+        pid,
+        error: error?.message || String(error)
+      });
+    }
+  }
+  if (killedPids.length > 0) {
+    closed = await waitClosed({ port: resolvedPort, timeoutMs, pollMs });
+    if (closed.ok) {
+      return {
+        ok: true,
+        method: browserCloseAttempted ? "Browser.close+process.kill" : "process.kill",
+        elapsed_ms: closed.elapsed_ms,
+        killedPids,
+        browserCloseError,
+        processErrors
+      };
+    }
+  }
+  return {
+    ok: false,
+    method: browserCloseAttempted && killedPids.length > 0
+      ? "Browser.close+process.kill"
+      : browserCloseAttempted
+        ? "Browser.close"
+        : killedPids.length > 0
+          ? "process.kill"
+          : "none",
+    killedPids,
+    browserCloseError,
+    processErrors,
+    wait: closed,
+    error: closed.error || browserCloseError || "Failed to close Chrome debug instance"
+  };
+}
+
+async function waitForChromeDebugPortClosed({
+  port = DEFAULT_DEBUG_PORT,
+  timeoutMs = 6000,
+  pollMs = 300
+} = {}) {
+  const started = Date.now();
+  while (Date.now() - started <= timeoutMs) {
+    const connection = await connectToChrome({ port });
+    if (!connection.ok) {
+      return {
+        ok: true,
+        elapsed_ms: Date.now() - started
+      };
+    }
+    await sleep(pollMs);
+  }
+  return {
+    ok: false,
+    elapsed_ms: Date.now() - started,
+    error: `Chrome debug port ${port} is still reachable`
+  };
+}
+
+function summarizeChromeLaunch(launch = {}, reason = "") {
+  return {
+    reason,
+    ok: Boolean(launch?.ok),
+    launched: Boolean(launch?.ok),
+    executablePath: launch?.executablePath || null,
+    userDataDir: launch?.userDataDir || null,
+    launchArgs: Array.isArray(launch?.launchArgs) ? launch.launchArgs : [],
+    error: launch?.error || null
+  };
+}
+
+function execFileText(file, args = [], { timeoutMs = 5000, maxBuffer = 1024 * 1024 } = {}) {
+  return new Promise((resolve) => {
+    execFile(file, args, {
+      timeout: timeoutMs,
+      maxBuffer,
+      windowsHide: true
+    }, (error, stdout, stderr) => {
+      resolve({
+        ok: !error,
+        stdout: String(stdout || ""),
+        stderr: String(stderr || ""),
+        error: error?.message || ""
+      });
+    });
+  });
 }
 
 export async function waitForChromeConnection({
