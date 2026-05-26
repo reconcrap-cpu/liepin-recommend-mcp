@@ -87,6 +87,10 @@ import {
   runRecommendTraversalAudit,
   summarizeRecommendTraversal
 } from "./liepin/recommend-traversal.js";
+import {
+  normalizeRobustnessMode,
+  parseHeartbeatIntervalMs
+} from "./long-run-runtime.js";
 import { runCvStructureSurvey } from "./liepin/cv-survey.js";
 import { sampleRecommendDetailedResumes } from "./liepin/recommend-sampler.js";
 import {
@@ -100,7 +104,7 @@ import {
   requestPause,
   summarizeRun
 } from "./run-state.js";
-import { normalizeText, parsePositiveInteger, readJsonFile } from "./utils.js";
+import { isAllCandidateLimit, normalizeText, parsePositiveInteger, readJsonFile } from "./utils.js";
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const workerScriptPath = path.join(path.dirname(currentFilePath), "worker.js");
@@ -286,6 +290,7 @@ export async function runCli(argv = process.argv.slice(2)) {
       pid: worker.pid,
       state: snapshot.state,
       workflow: input.workflow,
+      robustness_mode: input.robustness_mode,
       preflight: {
         ok: true,
         targetPage: preflight.targetPage,
@@ -574,7 +579,7 @@ async function runResearchCommand(subcommand, flags, workspaceRoot = getWorkspac
     });
     const llm = resolveChatScreeningLlm(flags);
     const result = await runChatScreening({ port }, {
-      candidateLimit: requirePositiveIntegerFlag(flags["candidate-limit"] || flags.candidateLimit, "--candidate-limit"),
+      candidateLimit: requireCandidateLimitFlag(flags["candidate-limit"] || flags.candidateLimit, "--candidate-limit"),
       scanLimit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
       jobTitle: requireTextFlag(flags.job || flags["job-title"] || flags.jobTitle, "--job"),
       unreadOnly: parseRequiredBooleanFlag(flags["unread-only"] ?? flags.unreadOnly, "--unread-only"),
@@ -923,7 +928,13 @@ function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT
     mock_post_action: normalizeText(flags["mock-post-action"] || flags.mockPostAction),
     mock_reasoning: normalizeText(flags["mock-reasoning"] || flags.mockReasoning),
     allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, false),
-    allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
+    allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false),
+    robustness_mode: normalizeRobustnessMode(
+      flags["robustness-mode"] || flags.robustnessMode || flags.robustness_mode
+    ),
+    heartbeat_interval_ms: parseHeartbeatIntervalMs(
+      flags["heartbeat-interval-ms"] || flags.heartbeatIntervalMs || flags.heartbeat_interval_ms
+    )
   };
 
   const requestedWorkflow = normalizeText(flags.workflow) || (kind === RUN_KINDS.CHAT ? RUN_WORKFLOWS.CHAT_SCREENING : null);
@@ -1016,7 +1027,7 @@ function buildChatScreeningStartInputFlags(base, flags) {
   return {
     ...base,
     workflow: RUN_WORKFLOWS.CHAT_SCREENING,
-    candidate_limit: requirePositiveIntegerFlag(flags["candidate-limit"] || flags.candidateLimit, "--candidate-limit"),
+    candidate_limit: requireCandidateLimitFlag(flags["candidate-limit"] || flags.candidateLimit, "--candidate-limit"),
     scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
     job: requireTextFlag(flags.job || flags["job-title"] || flags.jobTitle, "--job"),
     unread_only: parseRequiredBooleanFlag(flags["unread-only"] ?? flags.unreadOnly, "--unread-only"),
@@ -1067,10 +1078,14 @@ function parseRequiredBooleanFlag(value, flagName) {
   throw new Error(`${flagName} must be true|false.`);
 }
 
-function requirePositiveIntegerFlag(value, flagName) {
+function requireCandidateLimitFlag(value, flagName) {
+  if (value === undefined || value === null || value === true) {
+    throw new Error(`${flagName} is required and must be a positive integer or all.`);
+  }
+  if (isAllCandidateLimit(value)) return null;
   const parsed = parsePositiveInteger(value, null);
   if (!parsed) {
-    throw new Error(`${flagName} is required and must be a positive integer.`);
+    throw new Error(`${flagName} is required and must be a positive integer or all.`);
   }
   return parsed;
 }
@@ -1143,10 +1158,10 @@ function buildHelp() {
     "  external-agent config [--output <path>]",
     "  external-agent-config [--output <path>]",
     "  provider check [--mode both|recommend|chat]",
-    "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
-    "  search start [--debug-port 9222] --profile <搜索profile> --job <岗位> --hide-read true|false [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false]",
-    "  chat start [--debug-port 9222] --candidate-limit <n> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--max-chars 12000] [--mock-llm] [--allow-request-resume true|false]",
-    "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false]",
+    "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false] [--robustness-mode off|observe|recover; default recover]",
+    "  search start [--debug-port 9222] --profile <搜索profile> --job <岗位> --hide-read true|false [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--robustness-mode off|observe|recover; default recover]",
+    "  chat start [--debug-port 9222] --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--max-chars 12000] [--mock-llm] [--allow-request-resume true|false] [--robustness-mode off|observe|recover; default recover]",
+    "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false] [--robustness-mode off|observe|recover; default recover]",
     "  runs list [--full]",
     "  runs progress [--kind recommend|search|chat|recommend-chat] [--include-completed true|false] [--limit 5] [--full]",
     "  runs status --run-id <id> [--full]",
@@ -1175,7 +1190,7 @@ function buildHelp() {
     "  research chat-screen-inputs --limit 10 [--filter 有简历]",
     "  research chat-policy-audit --limit 20 [--filter 有简历]",
     "  research chat-action --action none|request_resume [--row-key <key>] [--row-index <n>] [--allow-request-resume]",
-    "  research chat-screening --candidate-limit <n> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--mock-llm] --allow-request-resume",
+    "  research chat-screening --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--mock-llm] --allow-request-resume",
     "  research cv-survey --minimum 50 --batch 10 [--per-pass 10] [--rounds 4] [--no-progress]",
     "  research parse-survey --file <cv-structure-survey.json>",
     "  research audit-payload --file <cv-structure-survey.json> [--limit 10]"

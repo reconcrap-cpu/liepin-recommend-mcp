@@ -239,6 +239,53 @@ test("runWorker executes chat screening workflow with required chat inputs", asy
   });
 });
 
+test("runWorker passes all-candidates chat limit through as unlimited", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.CHAT,
+      phase: "P31",
+      input: {
+        workflow: RUN_WORKFLOWS.CHAT_SCREENING,
+        mock_llm: true,
+        candidate_limit: "扫到底",
+        job: "全部职位",
+        unread_only: false,
+        criteria: "筛选条件"
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        chatScreening: async (_browser, options) => {
+          assert.equal(options.candidateLimit, null);
+          return {
+            passed: true,
+            requestedCandidateLimit: null,
+            scanAllCandidates: true,
+            requestResumeSuccesses: 1,
+            processedCandidates: 3,
+            screenableCandidates: 2,
+            skippedRows: 1,
+            llmCalls: 2,
+            actionClicks: 1,
+            stopReason: "list_bottom_reached",
+            violations: [],
+            items: []
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.result.summary.targetRequestResumeSuccesses, null);
+  });
+});
+
 test("runWorker pauses search only at safe checkpoint point", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
   await withRuntimeHome(workspaceRoot, async () => {
@@ -480,6 +527,147 @@ test("runWorker persists recommend dry-run progress emitted by executor", async 
     assert.equal(stored.state, "completed");
     assert.equal(stored.progress.workflow, RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING);
     assert.equal(stored.progress.processedCandidates, 1);
+  });
+});
+
+test("runWorker enables recover robustness runtime by default", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.RECOMMEND,
+      phase: "P29",
+      input: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+        mock_llm: true,
+        candidate_limit: 1
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        recommendDryRun: async (_browser, { onProgress }) => {
+          onProgress({
+            stage: "recommend_llm",
+            statusMessage: "正在评估推荐候选人：候选人A",
+            progress: {
+              workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+              currentCandidateLabel: "候选人A"
+            }
+          });
+          onProgress({
+            stage: "candidate_completed",
+            statusMessage: "候选人已完成：候选人A",
+            progress: {
+              workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+              lastItem: { index: 0, status: "screened" }
+            }
+          });
+          return {
+            passed: true,
+            dryRun: true,
+            requestedCandidateLimit: 1,
+            processedCandidates: 1,
+            passedCandidates: 1,
+            screenableCandidates: 1,
+            llmCalls: 1,
+            actionClicks: 0,
+            closeAction: { closed: true },
+            violations: [],
+            items: [{ index: 0, status: "screened" }]
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.result.robustness.mode, "recover");
+    assert.equal(stored.result.robustness.candidatesObserved, 1);
+    const events = fs.readFileSync(stored.artifacts.eventsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.some((event) => event.type === "candidate_started"), true);
+    assert.equal(events.some((event) => event.type === "candidate_finished"), true);
+    assert.equal(fs.existsSync(stored.artifacts.checkpointPath), true);
+  });
+});
+
+test("runWorker observe mode records candidate timing and additive checkpoint", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.RECOMMEND,
+      phase: "P29",
+      input: {
+        workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+        mock_llm: true,
+        candidate_limit: 1,
+        robustness_mode: "observe"
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        recommendDryRun: async (_browser, { onProgress }) => {
+          onProgress({
+            stage: "recommend_llm",
+            statusMessage: "正在评估推荐候选人：候选人A",
+            progress: {
+              workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+              currentCandidateLabel: "候选人A",
+              currentScan: 1
+            }
+          });
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          onProgress({
+            stage: "candidate_completed",
+            statusMessage: "候选人已完成：候选人A",
+            progress: {
+              workflow: RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING,
+              processedCandidates: 1,
+              llmCalls: 1,
+              lastItem: { index: 0, status: "screened" }
+            }
+          });
+          return {
+            passed: true,
+            dryRun: true,
+            requestedCandidateLimit: 1,
+            processedCandidates: 1,
+            passedCandidates: 1,
+            screenableCandidates: 1,
+            llmCalls: 1,
+            actionClicks: 0,
+            closeAction: { closed: true },
+            violations: [],
+            items: [{ index: 0, status: "screened" }]
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.result.robustness.mode, "observe");
+    assert.equal(stored.result.robustness.candidatesObserved, 1);
+    assert.equal(stored.result.robustness.candidateDurationMs.count, 1);
+    const checkpoint = JSON.parse(fs.readFileSync(stored.artifacts.checkpointPath, "utf8"));
+    assert.equal(checkpoint.schemaVersion, "liepin_long_run_observe_checkpoint_v1");
+    assert.equal(checkpoint.workflow, RUN_WORKFLOWS.RECOMMEND_DRY_RUN_SCREENING);
+    const events = fs.readFileSync(stored.artifacts.eventsPath, "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(events.some((event) => event.type === "candidate_started"), true);
+    assert.equal(events.some((event) => event.type === "candidate_finished"), true);
+    assert.equal(events.some((event) => event.type === "checkpoint_written"), true);
   });
 });
 

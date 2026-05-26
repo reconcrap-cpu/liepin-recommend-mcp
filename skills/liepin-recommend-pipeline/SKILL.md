@@ -56,6 +56,7 @@ chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepi
 - **异步 run 行为**
   - 拿到 `ACCEPTED + run_id` 后默认停止本轮，不自动高频轮询。
   - 只有用户要求查进度时才调用 `liepin_run_progress`；有明确 `run_id` 时传入该 `run_id`。
+  - 长跑鲁棒性默认启用 `robustness_mode="recover"`；默认不传即可使用 recover。只有需要复现旧行为时才显式传 `robustness_mode="off"`，需要只记录不恢复时传 `robustness_mode="observe"`。
 
 ## Required Inputs
 
@@ -78,6 +79,8 @@ chat-only 任务（只跑聊天页筛选，不经过推荐页）应交给 `liepi
 - `filter`（推荐侧猎聘页面筛选条件；先提供 `liepin_recommend_filter_options` 的字段/选项让用户选择）
 - `recommend_criteria`
 - `chat_criteria`
+
+可选：`robustness_mode`。正式默认值是 `"recover"`；只有用户要复现旧行为时传 `"off"`，要做 observe 对照时传 `"observe"`。
 
 ## Question Style
 

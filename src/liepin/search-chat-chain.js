@@ -5,12 +5,16 @@ import {
 } from "../chrome.js";
 import {
   DEFAULT_DEBUG_PORT,
+  DEFAULT_ROBUSTNESS_MODE,
   DEFAULT_RECOMMEND_STEP_DELAY_MS,
+  ROBUSTNESS_MODES,
   RUN_WORKFLOWS
 } from "../constants.js";
+import { classifyLongRunFailure } from "../long-run-runtime.js";
 import { runStructuredScreening, SCREENING_MODES } from "../llm-adapter.js";
 import { normalizeText, sleep } from "../utils.js";
 import { auditCvPayloadCoverage, buildCvScreeningInput } from "./cv-payload.js";
+import { COMMUNICATION_QUOTA_EXHAUSTED_STATUS } from "./chat-card-limit.js";
 import { extractRecommendCandidateIdentity } from "./recommend-action.js";
 import {
   applySearchQuickProfile,
@@ -21,13 +25,15 @@ import {
   prepareSearchJobSelection,
   readSearchListState,
   readSearchModalSnapshot,
-  readSearchPaginationState,
   setSearchHideReadFilter,
+  waitForSearchPaginationState,
   waitForSearchCards
 } from "./search-action.js";
 
 export const SEARCH_CHAT_CHAIN_SCHEMA_VERSION = "liepin_search_chat_chain_v1";
 export const SEARCH_CHAT_CHAIN_CHECKPOINT_SCHEMA_VERSION = "liepin_search_chat_chain_checkpoint_v1";
+const MAX_CONSECUTIVE_SEARCH_OPEN_RECOVERIES = 3;
+const MAX_TOTAL_SEARCH_OPEN_RECOVERIES = 25;
 
 export async function runSearchChatChain({
   port = DEFAULT_DEBUG_PORT
@@ -47,7 +53,8 @@ export async function runSearchChatChain({
   checkpoint = null,
   onCheckpoint = null,
   onSafeControlPoint = null,
-  onProgress = null
+  onProgress = null,
+  robustnessMode = DEFAULT_ROBUSTNESS_MODE
 } = {}) {
   const requestedProfile = normalizeText(profile);
   const requestedJobTitle = normalizeText(jobTitle);
@@ -64,7 +71,9 @@ export async function runSearchChatChain({
     jobTitle: requestedJobTitle,
     hideRead: requestedHideRead
   });
+  const recoverEnabled = normalizeText(robustnessMode) === ROBUSTNESS_MODES.RECOVER;
   const items = restoredCheckpoint?.items ? [...restoredCheckpoint.items] : [];
+  const recoveries = restoredCheckpoint?.recoveries ? [...restoredCheckpoint.recoveries] : [];
   const seenTextHashes = new Set([
     ...(restoredCheckpoint?.seenTextHashes || []),
     ...items.map((item) => item.textHash).filter(Boolean)
@@ -78,8 +87,11 @@ export async function runSearchChatChain({
     ?? items.filter((item) => ["search_contacted", "search_already_contacted"].includes(item.status)).length;
   let greetedCandidates = restoredCheckpoint?.greetedCandidates
     ?? countSearchGreetingSentItems(items);
+  let communicationQuotaExhausted = Boolean(restoredCheckpoint?.communicationQuotaExhausted);
+  let stopReason = restoredCheckpoint?.stopReason || "";
   let currentPageNumber = restoredCheckpoint?.currentPageNumber || 1;
   let pageCardIndex = restoredCheckpoint?.pageCardIndex ?? Math.max(0, startIndex || 0);
+  let consecutiveOpenRecoveries = 0;
 
   const progressState = {
     targetCandidates: requestedCandidateLimit,
@@ -96,6 +108,8 @@ export async function runSearchChatChain({
     llmCalls,
     communicationClicks,
     alreadyContactedCandidates,
+    communicationQuotaExhausted,
+    stopReason,
     currentCandidateLabel: "",
     lastItem: null
   };
@@ -114,6 +128,8 @@ export async function runSearchChatChain({
       alreadyContactedCandidates,
       passedCandidates,
       greetedCandidates,
+      communicationQuotaExhausted,
+      stopReason,
       violations,
       items,
       stage,
@@ -196,20 +212,28 @@ export async function runSearchChatChain({
         scannedCandidates: items.length
       });
 
-      while ((requestedScanLimit === null || items.length < requestedScanLimit) && greetedCandidates < requestedCandidateLimit) {
+      while (
+        (requestedScanLimit === null || items.length < requestedScanLimit)
+        && greetedCandidates < requestedCandidateLimit
+        && !communicationQuotaExhausted
+      ) {
         await assertNotRiskPage(client, "搜索串联扫描中");
         await waitForSearchCards(client);
         const listState = await readSearchListState(client);
         currentPageNumber = parsePageNumber(listState.activePageText, currentPageNumber);
         if (pageCardIndex >= listState.cardCount) {
-          const pagination = await readSearchPaginationState(client);
+          const pagination = await waitForSearchPaginationState(client, { timeoutMs: 7000 });
           if (!pagination.nextExists || pagination.nextDisabled) {
             violations.push({
               code: "search_reached_last_page_before_target",
               scannedCandidates: items.length,
               passedCandidates,
               greetedCandidates,
-              requestedCandidateLimit
+              requestedCandidateLimit,
+              currentPageNumber,
+              pageCardIndex,
+              listState,
+              pagination
             });
             break;
           }
@@ -217,7 +241,12 @@ export async function runSearchChatChain({
           if (!nextPage.clicked) {
             violations.push({
               code: "search_next_page_not_clicked",
-              reason: nextPage.reason || "unknown"
+              reason: nextPage.reason || "unknown",
+              currentPageNumber,
+              pageCardIndex,
+              listState,
+              pagination: nextPage.before || pagination,
+              beforeList: nextPage.beforeList || null
             });
             break;
           }
@@ -237,7 +266,68 @@ export async function runSearchChatChain({
           currentCandidateLabel: ""
           }
         );
-        const openAction = await openSearchCardByIndex(client, pageCardIndex);
+        let openAction = null;
+        try {
+          openAction = await openSearchCardByIndex(client, pageCardIndex);
+          consecutiveOpenRecoveries = 0;
+        } catch (error) {
+          const recovery = await recoverSearchOpenFailure(error, {
+            client,
+            recoverEnabled,
+            scanIndex,
+            currentPageNumber,
+            pageCardIndex,
+            consecutiveOpenRecoveries,
+            recoveryCount: recoveries.length
+          });
+          if (!recovery.recovered) throw error;
+          recoveries.push(recovery);
+          if (recovery.openAction) {
+            openAction = recovery.openAction;
+            consecutiveOpenRecoveries = 0;
+          } else {
+            consecutiveOpenRecoveries += 1;
+            const recoveryItem = {
+              index: scanIndex,
+              scanIndex,
+              pageNumber: currentPageNumber,
+              cardIndex: pageCardIndex,
+              profile: requestedProfile,
+              jobTitle: requestedJobTitle,
+              candidate: {},
+              llmCalled: false,
+              decision: null,
+              chatAction: {
+                action: "none",
+                executed: false,
+                clicked: false,
+                status: "search_open_recovered_skip"
+              },
+              status: "search_open_recovered_skip",
+              recovery,
+              violations: []
+            };
+            items.push(recoveryItem);
+            pageCardIndex += 1;
+            emitProgress(
+              "search_candidate_recovered",
+              `搜索候选人打开失败，已跳过第 ${currentPageNumber} 页第 ${pageCardIndex} 张卡片：${recovery.reason}`,
+              {
+                currentScan: scanIndex + 1,
+                currentPageNumber,
+                currentCardIndex: pageCardIndex - 1,
+                scannedCandidates: items.length,
+                currentCandidateLabel: "",
+                lastItem: summarizeSearchChatChainProgressItem(recoveryItem)
+              }
+            );
+            await saveSearchCheckpoint("search_checkpoint", "已保存搜索 recovery checkpoint");
+            if (typeof onSafeControlPoint === "function") {
+              await onSafeControlPoint(buildPartialWorkflowResult("search_candidate_recovered", "搜索候选人打开失败后已安全跳过"));
+            }
+            continue;
+          }
+        }
         await sleep(stepDelayMs);
         await assertNotRiskPage(client, "打开搜索详情后检查");
 
@@ -344,6 +434,27 @@ export async function runSearchChatChain({
           item.chatAction = await executeSearchChatAction(client, {
             jobTitle: requestedJobTitle
           });
+          if (item.chatAction.quotaExhausted || item.chatAction.status === COMMUNICATION_QUOTA_EXHAUSTED_STATUS) {
+            communicationQuotaExhausted = true;
+            stopReason = COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
+            item.status = COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
+            items.push(item);
+            finalizeItemProgress(item);
+            emitProgress(
+              COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+              "检测到购买开聊卡弹窗，沟通次数已达到上限，已停止猎聘搜索任务",
+              {
+                scannedCandidates: items.length,
+                passedCandidates,
+                greetedCandidates,
+                llmCalls,
+                communicationClicks,
+                alreadyContactedCandidates,
+                stopReason
+              }
+            );
+            break;
+          }
           if (item.chatAction.clicked) communicationClicks += 1;
           if (item.chatAction.status === "already_contacted") alreadyContactedCandidates += 1;
           if (item.chatAction.ok) {
@@ -368,7 +479,9 @@ export async function runSearchChatChain({
           items.push(item);
           finalizeItemProgress(item);
         } finally {
-          const closeAction = await closeSearchModalToList(client);
+          const closeAction = await closeSearchModalToList(client, {
+            waitForSentGreetingUpsellMs: item?.chatAction?.clicked ? 5000 : 0
+          });
           if (item) {
             item.closeAction = closeAction;
             if (!closeAction.closed) {
@@ -384,30 +497,8 @@ export async function runSearchChatChain({
           }
           pageCardIndex += 1;
           if (item && items.includes(item)) {
-            const checkpointPayload = buildSearchCheckpoint({
-              requestedCandidateLimit,
-              requestedScanLimit,
-              requestedProfile,
-              requestedJobTitle,
-              requestedHideRead,
-              startIndex,
-              stepDelayMs,
-              maxPayloadChars,
-              currentPageNumber,
-              pageCardIndex,
-              llmCalls,
-              communicationClicks,
-              alreadyContactedCandidates,
-              passedCandidates,
-              greetedCandidates,
-              seenTextHashes,
-              violations,
-              items
-            });
+            await saveSearchCheckpoint("search_checkpoint", "已保存搜索 checkpoint");
             const partialResult = buildPartialWorkflowResult("search_checkpoint", "已保存搜索 checkpoint");
-            if (typeof onCheckpoint === "function") {
-              await onCheckpoint(checkpointPayload, partialResult);
-            }
             if (typeof onSafeControlPoint === "function") {
               await onSafeControlPoint(partialResult);
             }
@@ -429,7 +520,10 @@ export async function runSearchChatChain({
         alreadyContactedCandidates,
         passedCandidates,
         greetedCandidates,
+        communicationQuotaExhausted,
+        stopReason: stopReason || (greetedCandidates >= requestedCandidateLimit ? "candidate_limit_reached" : "completed"),
         violations,
+        recoveries,
         items,
         jobPreparation,
         profileAction,
@@ -461,6 +555,34 @@ export async function runSearchChatChain({
       lastItem: summarizeSearchChatChainProgressItem(item)
     });
   }
+
+  async function saveSearchCheckpoint(stage, statusMessage) {
+    if (typeof onCheckpoint !== "function") return;
+    const checkpointPayload = buildSearchCheckpoint({
+      requestedCandidateLimit,
+      requestedScanLimit,
+      requestedProfile,
+      requestedJobTitle,
+      requestedHideRead,
+      startIndex,
+      stepDelayMs,
+      maxPayloadChars,
+      currentPageNumber,
+      pageCardIndex,
+      llmCalls,
+      communicationClicks,
+      alreadyContactedCandidates,
+      passedCandidates,
+      greetedCandidates,
+      communicationQuotaExhausted,
+      stopReason,
+      seenTextHashes,
+      violations,
+      recoveries,
+      items
+    });
+    await onCheckpoint(checkpointPayload, buildPartialWorkflowResult(stage, statusMessage));
+  }
 }
 
 export function evaluateSearchChatChain(result = {}) {
@@ -476,10 +598,12 @@ export function evaluateSearchChatChain(result = {}) {
   const greetedCandidates = Number.isFinite(result.greetedCandidates)
     ? result.greetedCandidates
     : countSearchGreetingSentItems(items);
-  if (greetedCandidates < (result.requestedCandidateLimit || 0)) {
+  if (greetedCandidates < (result.requestedCandidateLimit || 0) && !result.communicationQuotaExhausted) {
     failures.push("not_enough_search_greetings");
   }
   for (const item of items) {
+    if (isCommunicationQuotaExhaustedItem(item)) continue;
+    if (isSearchOpenRecoveredSkipItem(item)) continue;
     if (!item.llmCalled && item.status !== "duplicate_search_candidate") {
       failures.push(`candidate_${item.index}_llm_not_called`);
     }
@@ -517,13 +641,93 @@ export function summarizeSearchChatChain(result = {}) {
     llmCalls: result.llmCalls || 0,
     communicationClicks: result.communicationClicks || 0,
     alreadyContactedCandidates: result.alreadyContactedCandidates || 0,
+    recoveries: Array.isArray(result.recoveries) ? result.recoveries.length : 0,
     actionClicks: result.actionClicks || 0,
+    communicationQuotaExhausted: Boolean(result.communicationQuotaExhausted),
+    stopReason: result.stopReason || "",
     violations: evaluation.failures
   };
 }
 
 export function shouldExecuteSearchChat(decision = {}) {
   return decision?.decision === "pass" && decision?.post_action === "chat";
+}
+
+async function recoverSearchOpenFailure(error, {
+  client,
+  recoverEnabled = false,
+  scanIndex,
+  currentPageNumber,
+  pageCardIndex,
+  consecutiveOpenRecoveries = 0,
+  recoveryCount = 0
+} = {}) {
+  const classification = classifyLongRunFailure(error);
+  const recovery = {
+    type: "search_open_candidate",
+    scanIndex,
+    pageNumber: currentPageNumber,
+    cardIndex: pageCardIndex,
+    error: {
+      code: normalizeText(error?.code),
+      message: normalizeText(error?.message || error)
+    },
+    classification,
+    recovered: false,
+    retried: false,
+    skipped: false,
+    reason: ""
+  };
+  if (!recoverEnabled) {
+    recovery.reason = "recover_mode_disabled";
+    return recovery;
+  }
+  if (!classification.recoverable) {
+    recovery.reason = "failure_not_recoverable";
+    return recovery;
+  }
+  if (consecutiveOpenRecoveries >= MAX_CONSECUTIVE_SEARCH_OPEN_RECOVERIES) {
+    recovery.reason = "consecutive_recovery_limit_reached";
+    return recovery;
+  }
+  if (recoveryCount >= MAX_TOTAL_SEARCH_OPEN_RECOVERIES) {
+    recovery.reason = "total_recovery_limit_reached";
+    return recovery;
+  }
+
+  try {
+    recovery.cleanup = await closeSearchModalToList(client);
+    await waitForSearchCards(client);
+  } catch (cleanupError) {
+    recovery.cleanupError = {
+      code: normalizeText(cleanupError?.code),
+      message: normalizeText(cleanupError?.message || cleanupError)
+    };
+    recovery.reason = "cleanup_before_retry_failed";
+    return recovery;
+  }
+  try {
+    recovery.retried = true;
+    recovery.openAction = await openSearchCardByIndex(client, pageCardIndex);
+    recovery.recovered = true;
+    recovery.reason = "open_retry_succeeded";
+    return recovery;
+  } catch (retryError) {
+    const retryClassification = classifyLongRunFailure(retryError);
+    recovery.retryError = {
+      code: normalizeText(retryError?.code),
+      message: normalizeText(retryError?.message || retryError),
+      classification: retryClassification
+    };
+    if (!retryClassification.recoverable) {
+      recovery.reason = "retry_failure_not_recoverable";
+      return recovery;
+    }
+    recovery.recovered = true;
+    recovery.skipped = true;
+    recovery.reason = "open_retry_failed_candidate_skipped";
+    return recovery;
+  }
 }
 
 function buildSearchChatChainResult({
@@ -540,7 +744,10 @@ function buildSearchChatChainResult({
   alreadyContactedCandidates,
   passedCandidates,
   greetedCandidates,
+  communicationQuotaExhausted = false,
+  stopReason = "",
   violations,
+  recoveries = [],
   items,
   jobPreparation = null,
   profileAction = null,
@@ -560,6 +767,8 @@ function buildSearchChatChainResult({
     communicationClicks,
     alreadyContactedCandidates,
     actionClicks: communicationClicks,
+    communicationQuotaExhausted: Boolean(communicationQuotaExhausted),
+    stopReason,
     profile: requestedProfile,
     jobTitle: requestedJobTitle,
     hideRead: Boolean(requestedHideRead),
@@ -572,6 +781,7 @@ function buildSearchChatChainResult({
     profileAction,
     hideReadFilter,
     violations: [...violations],
+    recoveries: [...recoveries],
     items: [...items],
     passed
   };
@@ -598,6 +808,8 @@ function buildSearchChatChainProgressSnapshot(state = {}) {
     communicationClicks: state.communicationClicks || 0,
     alreadyContactedCandidates: state.alreadyContactedCandidates || 0,
     actionClicks: state.communicationClicks || 0,
+    communicationQuotaExhausted: Boolean(state.communicationQuotaExhausted),
+    stopReason: state.stopReason || "",
     currentCandidateLabel: state.currentCandidateLabel || "",
     lastItem: state.lastItem || null
   };
@@ -668,7 +880,10 @@ function normalizeSearchCheckpoint(checkpoint, {
     currentPageNumber: Math.max(1, Number.parseInt(String(checkpoint.currentPageNumber || 1), 10) || 1),
     pageCardIndex: Math.max(0, Number.parseInt(String(checkpoint.pageCardIndex || 0), 10) || 0),
     items: Array.isArray(checkpoint.items) ? checkpoint.items : [],
+    recoveries: Array.isArray(checkpoint.recoveries) ? checkpoint.recoveries : [],
     violations: Array.isArray(checkpoint.violations) ? checkpoint.violations : [],
+    communicationQuotaExhausted: Boolean(checkpoint.communicationQuotaExhausted),
+    stopReason: normalizeText(checkpoint.stopReason) || "",
     seenTextHashes: Array.isArray(checkpoint.seenTextHashes) ? checkpoint.seenTextHashes : []
   };
 }
@@ -689,8 +904,11 @@ function buildSearchCheckpoint({
   alreadyContactedCandidates,
   passedCandidates,
   greetedCandidates,
+  communicationQuotaExhausted = false,
+  stopReason = "",
   seenTextHashes,
   violations,
+  recoveries = [],
   items
 } = {}) {
   return {
@@ -711,8 +929,11 @@ function buildSearchCheckpoint({
     alreadyContactedCandidates,
     passedCandidates,
     greetedCandidates,
+    communicationQuotaExhausted: Boolean(communicationQuotaExhausted),
+    stopReason: normalizeText(stopReason),
     seenTextHashes: [...seenTextHashes],
     violations: [...violations],
+    recoveries: [...recoveries],
     items: [...items]
   };
 }
@@ -764,6 +985,18 @@ function isSearchGreetingSentItem(item = {}) {
     && item.chatAction?.ok
     && item.chatAction?.clicked
     && item.chatAction?.status === "search_contacted";
+}
+
+function isCommunicationQuotaExhaustedItem(item = {}) {
+  return item.status === COMMUNICATION_QUOTA_EXHAUSTED_STATUS
+    || item.chatAction?.quotaExhausted
+    || item.chatAction?.status === COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
+}
+
+function isSearchOpenRecoveredSkipItem(item = {}) {
+  return item.status === "search_open_recovered_skip"
+    && item.recovery?.recovered
+    && item.recovery?.skipped;
 }
 
 async function assertNotRiskPage(client, actionLabel) {

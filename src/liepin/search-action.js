@@ -2,6 +2,15 @@ import { normalizeSnapshot } from "./snapshot.js";
 import { searchSelectors } from "./selectors.js";
 import { normalizeText, sha1, sleep } from "../utils.js";
 import {
+  COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+  isChatCardLimitModalText
+} from "./chat-card-limit.js";
+import {
+  closeSentGreetingUpsellModal,
+  readSentGreetingUpsellModal,
+  isSentGreetingUpsellModalText
+} from "./sent-greeting-upsell.js";
+import {
   ensureSearchJobSelectorVisible,
   openSearchSelectedJobDropdown,
   readSearchJobDropdownState
@@ -702,9 +711,39 @@ export async function executeSearchChatAction(client, {
       click
     };
   }
-  const serviceVisible = await waitForSearchServiceJobModal(client);
-  if (!serviceVisible) {
-    const after = await readSearchChatButtonState(client);
+  const postClickOutcome = await waitForSearchChatActionOutcome(client);
+  if (postClickOutcome.type === "chat_card_limit") {
+    return {
+      ok: false,
+      status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+      quotaExhausted: true,
+      clicked: true,
+      before,
+      click,
+      chatCardLimitModal: postClickOutcome.chatCardLimitModal
+    };
+  }
+  if (postClickOutcome.type === "sent_greeting_upsell") {
+    const sentGreetingUpsellModal = await closeSentGreetingUpsellModal(client);
+    const after = await waitForSearchChatButtonState(client, {
+      timeoutMs: 5000
+    });
+    const ok = Boolean(sentGreetingUpsellModal.closed && isAlreadyContactedButtonText(after.text));
+    return {
+      ok,
+      status: ok ? "search_contacted" : "sent_greeting_upsell_not_closed",
+      clicked: true,
+      before,
+      click,
+      selectedJob: null,
+      confirm: null,
+      modalClosed: Boolean(sentGreetingUpsellModal.closed),
+      sentGreetingUpsellModal,
+      after
+    };
+  }
+  if (postClickOutcome.type !== "service_job") {
+    const after = postClickOutcome.buttonState || await readSearchChatButtonState(client);
     if (isAlreadyContactedButtonText(after.text)) {
       return {
         ok: true,
@@ -767,10 +806,18 @@ export async function executeSearchChatAction(client, {
     timeoutMs: 8000,
     pollMs: 250
   });
-  const after = await waitForSearchChatButtonState(client, {
+  const sentGreetingUpsellModal = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: 2500
+  });
+  const finalAfter = await waitForSearchChatButtonState(client, {
     timeoutMs: 8000
   });
-  const ok = Boolean(confirm.clicked && modalClosed && isAlreadyContactedButtonText(after.text));
+  const ok = Boolean(
+    confirm.clicked
+      && modalClosed
+      && sentGreetingUpsellModal.closed
+      && isAlreadyContactedButtonText(finalAfter.text)
+  );
   return {
     ok,
     status: ok ? "search_contacted" : "search_contact_state_not_verified",
@@ -780,7 +827,150 @@ export async function executeSearchChatAction(client, {
     selectedJob,
     confirm,
     modalClosed: Boolean(modalClosed),
-    after
+    sentGreetingUpsellModal: sentGreetingUpsellModal.present ? sentGreetingUpsellModal : null,
+    after: finalAfter
+  };
+}
+
+async function waitForSearchChatActionOutcome(client, {
+  timeoutMs = 8000,
+  pollMs = 250
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await readSearchChatActionOutcomeState(client);
+    if (latest.type !== "pending") return latest;
+    await sleep(pollMs);
+  }
+  return latest || {
+    type: "none",
+    serviceVisible: false,
+    buttonState: null,
+    chatCardLimitModal: null
+  };
+}
+
+async function readSearchChatActionOutcomeState(client) {
+  const state = await client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/gu, " ").trim();
+    const compact = (value) => normalize(value).replace(/\s+/gu, "");
+    const getText = (node) => normalize(node?.innerText || node?.textContent || "");
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const modalRoots = [...new Set([
+      ...document.querySelectorAll(".ant-lpt-modal-content"),
+      ...document.querySelectorAll(".ant-lpt-modal"),
+      ...document.querySelectorAll(".ant-im-modal-content"),
+      ...document.querySelectorAll(".ant-im-modal"),
+      ...document.querySelectorAll(".ant-im-modal-wrap"),
+      ...document.querySelectorAll("[role='dialog']")
+    ])].filter(visible);
+    const chatCardLimitModal = modalRoots.find((node) => {
+      const text = compact(getText(node));
+      return text.includes("购买开聊卡")
+        && (
+          text.includes("资源不足")
+          || text.includes("猎币支付")
+          || text.includes("在线聊意向求职者")
+          || text.includes("免费索要联系方式")
+        );
+    }) || null;
+    if (chatCardLimitModal) {
+      const modalText = getText(chatCardLimitModal);
+      return {
+        type: "chat_card_limit",
+        chatCardLimitModal: {
+          present: true,
+          status: "communication_quota_exhausted",
+          reason: "buy_chat_card_modal",
+          title: getText(chatCardLimitModal.querySelector(".ant-lpt-modal-title, [class*='modal-title']")),
+          hasResourceInsufficientTip: compact(modalText).includes("资源不足"),
+          hasLiebiPayment: compact(modalText).includes("猎币支付") || compact(modalText).includes("猎币"),
+          modalText: modalText.slice(0, 1000)
+        }
+      };
+    }
+    const sentGreetingUpsellModal = modalRoots.find((node) => {
+      const text = compact(getText(node));
+      return text.includes("已向候选人发送消息")
+        && (
+          text.includes("更快获取人选回复")
+          || text.includes("超级聊聊权益")
+          || text.includes("加急通道触达")
+          || text.includes("免费发起")
+        );
+    }) || null;
+    if (sentGreetingUpsellModal) {
+      const modalText = getText(sentGreetingUpsellModal);
+      const buttons = [...sentGreetingUpsellModal.querySelectorAll("button")]
+        .filter(visible)
+        .map((node) => getText(node) || node.getAttribute("aria-label") || "")
+        .filter(Boolean);
+      return {
+        type: "sent_greeting_upsell",
+        sentGreetingUpsellModal: {
+          present: true,
+          status: "sent_greeting_upsell_modal",
+          reason: "sent_greeting_upsell_modal",
+          title: getText(sentGreetingUpsellModal.querySelector(".ant-im-modal-title, [class*='modal-title']")),
+          buttonTexts: buttons,
+          modalText: modalText.slice(0, 1000)
+        }
+      };
+    }
+    const serviceContainer = document.querySelector(selectors.serviceJobContainer);
+    if (serviceContainer && visible(serviceContainer) && getText(serviceContainer).length > 0) {
+      return {
+        type: "service_job",
+        serviceVisible: true
+      };
+    }
+    const modalRoot = document.querySelector(selectors.modalRoot);
+    const button = modalRoot?.querySelector(selectors.openChatButton)
+      || document.querySelector(selectors.openChatButton);
+    return {
+      type: "pending",
+      serviceVisible: false,
+      buttonState: {
+        exists: Boolean(button),
+        text: getText(button),
+        className: String(button?.className || ""),
+        disabled: Boolean(button?.disabled || button?.getAttribute?.("aria-disabled") === "true")
+      }
+    };
+  }, searchSelectors);
+  if (state?.type === "chat_card_limit" && !isChatCardLimitModalText(state.chatCardLimitModal?.modalText || "")) {
+    return {
+      type: "pending",
+      serviceVisible: false,
+      buttonState: null,
+      chatCardLimitModal: null
+    };
+  }
+  if (state?.type === "sent_greeting_upsell" && !isSentGreetingUpsellModalText(state.sentGreetingUpsellModal?.modalText || "")) {
+    return {
+      type: "pending",
+      serviceVisible: false,
+      buttonState: null,
+      sentGreetingUpsellModal: null
+    };
+  }
+  if (state?.type === "pending" && isAlreadyContactedButtonText(state.buttonState?.text)) {
+    return {
+      ...state,
+      type: "already_contacted"
+    };
+  }
+  return state || {
+    type: "pending",
+    serviceVisible: false,
+    buttonState: null,
+    chatCardLimitModal: null
   };
 }
 
@@ -1045,17 +1235,47 @@ export async function confirmSearchServiceJobModal(client) {
   }, searchSelectors);
 }
 
-export async function closeSearchModalToList(client) {
+export async function closeSearchModalToList(client, {
+  waitForSentGreetingUpsellMs = 0
+} = {}) {
   await closeSearchServiceJobModalIfOpen(client);
-  const before = await client.evaluate((selectors) => Boolean(document.querySelector(selectors.modalRoot)), searchSelectors);
+  const beforeUpsellClose = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: 2500
+  });
+  const before = await hasOpenSearchDetailModal(client);
   if (!before) {
+    const delayedUpsellClose = beforeUpsellClose?.present
+      ? beforeUpsellClose
+      : await waitForAndCloseSentGreetingUpsellModal(client, {
+        waitMs: waitForSentGreetingUpsellMs,
+        closeTimeoutMs: 2500
+      });
+    const listScrollRestore = await restoreSearchListScrollState(client);
     return {
-      closed: true,
-      closeMethod: "already_closed"
+      closed: Boolean(delayedUpsellClose?.closed),
+      closeMethod: delayedUpsellClose?.present ? "sent_greeting_upsell" : "already_closed",
+      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(delayedUpsellClose),
+      listScrollRestore
     };
   }
   const click = await client.evaluate((selectors) => {
-    const button = document.querySelector(selectors.modalCloseButton);
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const roots = [...document.querySelectorAll(selectors.modalRoot)].filter(visible);
+    const root = roots[roots.length - 1] || document.querySelector(selectors.modalRoot);
+    const candidates = [
+      ...(root ? [...root.querySelectorAll("[class*='closeBtn'] [class*='antlpticon-close'], [class*='closeBtn'], .ant-lpt-modal-close, [aria-label='Close']")] : []),
+      ...document.querySelectorAll(selectors.modalCloseButton)
+    ];
+    const visibleCandidates = candidates.filter(visible);
+    const button = visibleCandidates.find((node) => String(node.className || "").includes("closeBtn"))
+      || visibleCandidates.find((node) => String(node.className || "").includes("antlpticon-close"))
+      || visibleCandidates[0]
+      || candidates[0];
     if (!button) {
       return {
         clicked: false,
@@ -1063,45 +1283,291 @@ export async function closeSearchModalToList(client) {
       };
     }
     button.scrollIntoView({ block: "center" });
+    const rect = button.getBoundingClientRect();
     button.click();
     return {
       clicked: true,
-      className: String(button.className || "")
+      className: String(button.className || ""),
+      target: {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      }
     };
   }, searchSelectors);
-  const closed = await client.waitFor((selector) => {
-    const node = document.querySelector(selector);
-    if (!node) return true;
-    const style = window.getComputedStyle(node);
-    const rect = node.getBoundingClientRect();
-    return style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0;
-  }, [searchSelectors.modalRoot], {
+  const closed = await waitForSearchDetailModalClosed(client, {
     timeoutMs: 7000,
     pollMs: 250
   });
   if (!closed) {
+    let closedByMouse = false;
+    if (click.target) {
+      await dispatchSearchMouseClick(client, click.target);
+      closedByMouse = await waitForSearchDetailModalClosed(client, {
+        timeoutMs: 3000,
+        pollMs: 250
+      });
+      if (closedByMouse) {
+        const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
+          waitMs: waitForSentGreetingUpsellMs,
+          closeTimeoutMs: 2500
+        });
+        const listScrollRestore = await restoreSearchListScrollState(client);
+        return {
+          closed: Boolean(sentGreetingUpsellModal?.closed),
+          resumeModalClosed: true,
+          closeMethod: click.clicked ? "close_button+mouse" : "mouse",
+          click,
+          sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal),
+          listScrollRestore
+        };
+      }
+    }
     await pressSearchEscapeKey(client);
-    const closedByEscape = await client.waitFor((selector) => {
-      const node = document.querySelector(selector);
-      if (!node) return true;
-      const style = window.getComputedStyle(node);
-      const rect = node.getBoundingClientRect();
-      return style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0;
-    }, [searchSelectors.modalRoot], {
+    const closedByEscape = await waitForSearchDetailModalClosed(client, {
       timeoutMs: 3000,
       pollMs: 250
     });
+    let forceDismiss = null;
+    let closedAfterFallbacks = closedByEscape;
+    if (!closedByEscape) {
+      forceDismiss = await forceDismissSearchDetailModal(client);
+      closedAfterFallbacks = await waitForSearchDetailModalClosed(client, {
+        timeoutMs: 1000,
+        pollMs: 100
+      });
+    }
+    const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
+      waitMs: waitForSentGreetingUpsellMs,
+      closeTimeoutMs: 2500
+    });
+    const listScrollRestore = await restoreSearchListScrollState(client);
     return {
-      closed: Boolean(closedByEscape),
-      closeMethod: click.clicked ? "close_button+escape" : "escape",
-      click
+      closed: Boolean(closedAfterFallbacks && sentGreetingUpsellModal?.closed),
+      resumeModalClosed: Boolean(closedAfterFallbacks),
+      closeMethod: [
+        click.clicked ? "close_button" : "",
+        "escape",
+        forceDismiss?.removed ? "force_remove" : ""
+      ].filter(Boolean).join("+"),
+      click,
+      forceDismiss: forceDismiss?.removed ? forceDismiss : null,
+      sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal),
+      listScrollRestore
     };
   }
+  const sentGreetingUpsellModal = await waitForAndCloseSentGreetingUpsellModal(client, {
+    waitMs: waitForSentGreetingUpsellMs,
+    closeTimeoutMs: 2500
+  });
+  const listScrollRestore = await restoreSearchListScrollState(client);
   return {
-    closed: Boolean(closed),
+    closed: Boolean(closed && sentGreetingUpsellModal?.closed),
+    resumeModalClosed: Boolean(closed),
     closeMethod: click.clicked ? "close_button" : "none",
-    click
+    click,
+    sentGreetingUpsellModal: summarizeSentGreetingUpsellClose(sentGreetingUpsellModal),
+    listScrollRestore
   };
+}
+
+async function dispatchSearchMouseClick(client, target = {}) {
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: target.x,
+    y: target.y,
+    button: "none",
+    buttons: 0,
+    clickCount: 0
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1
+  });
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1
+  });
+}
+
+async function forceDismissSearchDetailModal(client) {
+  return client.evaluate((selectors) => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const roots = [...document.querySelectorAll(selectors.modalRoot)].filter(visible);
+    const removed = [];
+    for (const root of roots) {
+      removed.push({
+        className: String(root.className || ""),
+        textLength: String(root.innerText || root.textContent || "").length
+      });
+      root.remove();
+    }
+    for (const mask of document.querySelectorAll(".ant-lpt-modal-mask, .ant-lpt-modal-wrap")) {
+      if (visible(mask) && !document.body.contains(mask.closest(selectors.modalRoot))) {
+        mask.remove();
+      }
+    }
+    document.body?.classList?.remove("ant-lpt-scrolling-effect");
+    document.body.style.overflow = "auto";
+    document.body.style.overflowY = "auto";
+    document.body.style.width = "";
+    document.body.style.paddingRight = "";
+    document.documentElement.style.overflow = "";
+    document.documentElement.style.overflowY = "";
+    document.documentElement.style.height = "";
+    return {
+      removed: removed.length > 0,
+      removedCount: removed.length,
+      removedNodes: removed
+    };
+  }, searchSelectors);
+}
+
+async function restoreSearchListScrollState(client) {
+  return client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const hasOpenDetailModal = [...document.querySelectorAll(selectors.modalPrintable)]
+      .some((node) => visible(node) && normalize(node.innerText || node.textContent).length > 100);
+    if (hasOpenDetailModal) {
+      return {
+        restored: false,
+        reason: "search_detail_modal_still_open"
+      };
+    }
+
+    const modalRootSelector = `${selectors.modalRoot}, .ant-lpt-modal-root`;
+    const removedRoots = [];
+    for (const root of document.querySelectorAll(modalRootSelector)) {
+      const textLength = normalize(root.innerText || root.textContent).length;
+      if (!visible(root) || textLength === 0) {
+        removedRoots.push({
+          className: String(root.className || ""),
+          textLength,
+          visible: visible(root)
+        });
+        root.remove();
+      }
+    }
+    const removedMasks = [];
+    for (const mask of document.querySelectorAll(".ant-lpt-modal-mask, .ant-lpt-modal-wrap")) {
+      const root = mask.closest(modalRootSelector);
+      if (!visible(mask) || !root || !document.body.contains(root)) {
+        removedMasks.push({
+          className: String(mask.className || ""),
+          visible: visible(mask)
+        });
+        mask.remove();
+      }
+    }
+    const previousUrl = location.href;
+    if (location.hash === "#preview") {
+      history.replaceState(history.state, document.title, location.pathname + location.search);
+    }
+    document.body?.classList?.remove("ant-lpt-scrolling-effect");
+    document.body.style.overflow = "auto";
+    document.body.style.overflowY = "auto";
+    document.body.style.width = "";
+    document.body.style.paddingRight = "";
+    document.documentElement.style.overflow = "";
+    document.documentElement.style.overflowY = "";
+    document.documentElement.style.height = "";
+    return {
+      restored: true,
+      previousUrl,
+      currentUrl: location.href,
+      removedRootCount: removedRoots.length,
+      removedMaskCount: removedMasks.length,
+      bodyOverflowY: window.getComputedStyle(document.body).overflowY,
+      htmlOverflowY: window.getComputedStyle(document.documentElement).overflowY,
+      htmlScrollHeight: document.documentElement.scrollHeight,
+      bodyScrollHeight: document.body.scrollHeight,
+      removedRoots,
+      removedMasks
+    };
+  }, searchSelectors);
+}
+
+async function hasOpenSearchDetailModal(client) {
+  return client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const printableNodes = [...document.querySelectorAll(selectors.modalPrintable)];
+    return printableNodes.some((node) => visible(node) && normalize(node.innerText || node.textContent).length > 100);
+  }, searchSelectors);
+}
+
+async function waitForSearchDetailModalClosed(client, {
+  timeoutMs = 7000,
+  pollMs = 250
+} = {}) {
+  return client.waitFor((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const printableNodes = [...document.querySelectorAll(selectors.modalPrintable)];
+    return !printableNodes.some((node) => visible(node) && normalize(node.innerText || node.textContent).length > 100);
+  }, [searchSelectors], {
+    timeoutMs,
+    pollMs
+  });
+}
+
+async function waitForAndCloseSentGreetingUpsellModal(client, {
+  waitMs = 0,
+  closeTimeoutMs = 2500,
+  pollMs = 200
+} = {}) {
+  const immediate = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: closeTimeoutMs,
+    pollMs
+  });
+  if (immediate?.present || waitMs <= 0) return immediate;
+
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+    const snapshot = await readSentGreetingUpsellModal(client);
+    if (snapshot?.present) {
+      return closeSentGreetingUpsellModal(client, {
+        timeoutMs: closeTimeoutMs,
+        pollMs
+      });
+    }
+  }
+  return immediate;
+}
+
+function summarizeSentGreetingUpsellClose(result) {
+  if (!result) return null;
+  if (result.present || result.clicked || result.closed === false) return result;
+  return null;
 }
 
 async function pressSearchEscapeKey(client) {
@@ -1171,35 +1637,66 @@ async function closeSearchServiceJobModalIfOpen(client) {
 export async function readSearchPaginationState(client) {
   return client.evaluate((selectors) => {
     const getText = (node) => (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
-    const pagebar = document.querySelector(selectors.pagebar);
-    const next = document.querySelector(selectors.nextPageButton);
-    const disabledNext = document.querySelector(selectors.disabledNextPageButton);
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const uniqueNodes = (nodes) => [...new Set(nodes.filter(Boolean))];
+    const exactPagebars = [...document.querySelectorAll(selectors.pagebar)];
+    const fallbackPagebars = [...document.querySelectorAll(".xpath-resume-list-box ul.ant-lpt-pagination, ul.ant-lpt-pagination")];
+    const pagebars = uniqueNodes([...exactPagebars, ...fallbackPagebars]);
+    const pagebar = pagebars.find(visible) || pagebars[0] || null;
+    const nextCandidates = pagebar
+      ? [...pagebar.querySelectorAll("li.ant-lpt-pagination-next")]
+      : [...document.querySelectorAll(selectors.nextPageButton)];
+    const next = nextCandidates.find(visible) || nextCandidates[0] || null;
     const items = [...(pagebar?.querySelectorAll("li") || [])].map((node, index) => ({
       index,
       text: getText(node),
       className: String(node.className || ""),
       ariaDisabled: node.getAttribute("aria-disabled") || "",
+      visible: visible(node),
       active: String(node.className || "").includes("active")
     }));
-    const active = items.find((item) => item.active) || null;
+    const active = items.find((item) => item.active && item.visible) || items.find((item) => item.active) || null;
     return {
       exists: Boolean(pagebar),
+      pagebarVisible: Boolean(pagebar && visible(pagebar)),
+      pagebarClassName: String(pagebar?.className || ""),
       activePageText: active?.text || "",
       items,
       nextExists: Boolean(next),
       nextDisabled: Boolean(
-        disabledNext
-        || next?.getAttribute("aria-disabled") === "true"
+        next?.getAttribute("aria-disabled") === "true"
         || String(next?.className || "").includes("disabled")
+        || next?.querySelector("button")?.disabled
       ),
       nextClassName: String(next?.className || ""),
-      nextAriaDisabled: next?.getAttribute("aria-disabled") || ""
+      nextAriaDisabled: next?.getAttribute("aria-disabled") || "",
+      nextVisible: Boolean(next && visible(next)),
+      pagebarCount: pagebars.length
     };
   }, searchSelectors);
 }
 
+export async function waitForSearchPaginationState(client, {
+  timeoutMs = 5000,
+  pollMs = 250
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await readSearchPaginationState(client);
+    if (latest.pagebarVisible && latest.nextExists) return latest;
+    await sleep(pollMs);
+  }
+  return latest || readSearchPaginationState(client);
+}
+
 export async function clickSearchNextPage(client) {
-  const before = await readSearchPaginationState(client);
+  const before = await waitForSearchPaginationState(client);
   const beforeList = await readSearchListState(client);
   if (!before.nextExists || before.nextDisabled) {
     return {
@@ -1210,13 +1707,22 @@ export async function clickSearchNextPage(client) {
     };
   }
   const click = await client.evaluate((selector) => {
-    const next = document.querySelector(selector);
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const pagebars = [...document.querySelectorAll(".xpath-resume-list-box .resumeListPagebar--OCRUK.hideLast--guqgs > ul, .xpath-resume-list-box ul.ant-lpt-pagination, ul.ant-lpt-pagination")];
+    const pagebar = pagebars.find(visible) || pagebars[0] || null;
+    const next = pagebar?.querySelector("li.ant-lpt-pagination-next") || document.querySelector(selector);
     if (!next) return { clicked: false, reason: "next_not_found" };
-    if (next.getAttribute("aria-disabled") === "true" || String(next.className || "").includes("disabled")) {
+    const button = next.querySelector("button") || next;
+    if (next.getAttribute("aria-disabled") === "true" || String(next.className || "").includes("disabled") || button.disabled) {
       return { clicked: false, reason: "next_disabled" };
     }
     next.scrollIntoView({ block: "center" });
-    next.click();
+    button.click();
     return {
       clicked: true,
       className: String(next.className || "")
@@ -1232,7 +1738,7 @@ export async function clickSearchNextPage(client) {
     };
   }
   await waitForSearchListRefresh(client, beforeList, { timeoutMs: 15000 });
-  const after = await readSearchPaginationState(client);
+  const after = await waitForSearchPaginationState(client);
   const afterList = await readSearchListState(client);
   return {
     clicked: true,

@@ -3,7 +3,10 @@
   "apiKey": "replace-with-real-api-key",
   "model": "your-model-name",
   "debugPort": 9222,
+  "reasoningEnabled": true,
   "reasoningEffort": "medium",
+  "reasoningStream": true,
+  "llmExtraBody": {},
   "llmTimeoutMs": 120000,
   "llmMaxRetries": 2
 }

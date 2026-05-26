@@ -1,7 +1,7 @@
 import { createPageClient, discoverLiepinPages, isCdpRuntimeTimeoutError } from "../chrome.js";
 import { DEFAULT_DEBUG_PORT, RUN_WORKFLOWS } from "../constants.js";
 import { runStructuredScreening, SCREENING_MODES } from "../llm-adapter.js";
-import { normalizeText, parsePositiveInteger, sleep } from "../utils.js";
+import { isAllCandidateLimit, normalizeText, parsePositiveInteger, sleep } from "../utils.js";
 import { activateAndReadChatRow, readResumeDetailSnapshot } from "./chat-sampler.js";
 import {
   CHAT_MAX_CONTACTS_SELECTOR,
@@ -35,9 +35,15 @@ export async function runChatScreening({
   provider = null,
   onProgress = null
 } = {}) {
-  const requestedCandidateLimit = parsePositiveInteger(candidateLimit, null);
-  if (!requestedCandidateLimit) {
-    throw new Error("chat_screening 需要 candidate_limit，且必须为正整数。");
+  if (candidateLimit === undefined) {
+    throw new Error("chat_screening 需要 candidate_limit，且必须为正整数或 all。");
+  }
+  const scanAllCandidates = candidateLimit === null || isAllCandidateLimit(candidateLimit);
+  const requestedCandidateLimit = scanAllCandidates
+    ? null
+    : parsePositiveInteger(candidateLimit, null);
+  if (!scanAllCandidates && !requestedCandidateLimit) {
+    throw new Error("chat_screening 需要 candidate_limit，且必须为正整数或 all。");
   }
   const normalizedJobTitle = normalizeText(jobTitle);
   if (!normalizedJobTitle) {
@@ -71,6 +77,7 @@ export async function runChatScreening({
     let stopReason = "";
     const progressState = {
       targetCandidates: requestedCandidateLimit,
+      scanAllCandidates,
       scanLimit: requestedScanLimit,
       observedRows: 0,
       processedCandidates: 0,
@@ -139,7 +146,8 @@ export async function runChatScreening({
       });
 
       let idleScrollPasses = 0;
-      while (requestResumeSuccesses < requestedCandidateLimit) {
+      let noNewRowsPasses = 0;
+      while (scanAllCandidates || requestResumeSuccesses < requestedCandidateLimit) {
         if (requestedScanLimit && processedCandidates >= requestedScanLimit) {
           stopReason = "scan_limit_reached";
           break;
@@ -150,7 +158,7 @@ export async function runChatScreening({
         let restartedAfterRefresh = false;
         let stopAfterRecoveryFailure = false;
 
-        for (let index = 0; index < rowCount && requestResumeSuccesses < requestedCandidateLimit; index += 1) {
+        for (let index = 0; index < rowCount && (scanAllCandidates || requestResumeSuccesses < requestedCandidateLimit); index += 1) {
           if (requestedScanLimit && processedCandidates >= requestedScanLimit) {
             stopReason = "scan_limit_reached";
             break;
@@ -253,6 +261,7 @@ export async function runChatScreening({
             }
             restartedAfterRefresh = true;
             idleScrollPasses = 0;
+            noNewRowsPasses = 0;
             emitProgress("candidate_completed", `页面刷新后跳过当前候选人并继续：${state.rowKey}`, {
               observedRows,
               processedCandidates,
@@ -413,6 +422,7 @@ export async function runChatScreening({
             }
             restartedAfterRefresh = true;
             idleScrollPasses = 0;
+            noNewRowsPasses = 0;
             break;
           }
         }
@@ -423,7 +433,7 @@ export async function runChatScreening({
         if (restartedAfterRefresh) {
           continue;
         }
-        if (requestResumeSuccesses >= requestedCandidateLimit) {
+        if (!scanAllCandidates && requestResumeSuccesses >= requestedCandidateLimit) {
           stopReason = "candidate_limit_reached";
           break;
         }
@@ -431,9 +441,15 @@ export async function runChatScreening({
           stopReason = "scan_limit_reached";
           break;
         }
+        if (newRowsThisWindow === 0 && seenRows.size > 0) {
+          noNewRowsPasses += 1;
+        } else {
+          noNewRowsPasses = 0;
+        }
         const latestSnapshot = await readChatListSnapshot(client);
         const preScrollStopReason = resolveChatScreeningScrollStopReason({
-          latestSnapshot
+          latestSnapshot,
+          noNewRowsPasses
         });
         if (preScrollStopReason) {
           stopReason = preScrollStopReason;
@@ -449,7 +465,8 @@ export async function runChatScreening({
         }
         const scrollStopReason = resolveChatScreeningScrollStopReason({
           scroll,
-          idleScrollPasses
+          idleScrollPasses,
+          noNewRowsPasses
         });
         if (scrollStopReason) {
           stopReason = scrollStopReason;
@@ -458,7 +475,7 @@ export async function runChatScreening({
       }
 
       if (!stopReason) {
-        stopReason = requestResumeSuccesses >= requestedCandidateLimit
+        stopReason = !scanAllCandidates && requestResumeSuccesses >= requestedCandidateLimit
           ? "candidate_limit_reached"
           : "completed";
       }
@@ -479,9 +496,12 @@ export async function runChatScreening({
         violations,
         items
       });
+      const completedRequestedScope = scanAllCandidates
+        ? stopReason !== "scan_limit_reached"
+        : requestResumeSuccesses >= requestedCandidateLimit;
       return {
         ...result,
-        passed: requestResumeSuccesses >= requestedCandidateLimit && violations.length === 0
+        passed: completedRequestedScope && violations.length === 0
       };
     } catch (error) {
       if (!error.partialResult) {
@@ -500,7 +520,7 @@ export function summarizeChatScreening(result = {}) {
     dryRun: false,
     job: result.jobTitle || "",
     unreadOnly: Boolean(result.unreadOnly),
-    targetRequestResumeSuccesses: result.requestedCandidateLimit || 0,
+    targetRequestResumeSuccesses: result.requestedCandidateLimit ?? null,
     requestResumeSuccesses: result.requestResumeSuccesses || 0,
     processedCandidates: result.processedCandidates || 0,
     screenableCandidates: result.screenableCandidates || 0,
@@ -515,7 +535,8 @@ export function summarizeChatScreening(result = {}) {
 export function resolveChatScreeningScrollStopReason({
   latestSnapshot = null,
   scroll = null,
-  idleScrollPasses = 0
+  idleScrollPasses = 0,
+  noNewRowsPasses = 0
 } = {}) {
   if (latestSnapshot?.maxContactsVisible || scroll?.maxContactsVisible) {
     return "max_contacts_reached";
@@ -525,6 +546,9 @@ export function resolveChatScreeningScrollStopReason({
   }
   if (idleScrollPasses >= 2) {
     return "no_scroll_progress";
+  }
+  if (noNewRowsPasses >= 2) {
+    return "no_new_rows_after_full_pass";
   }
   return "";
 }
@@ -1229,7 +1253,8 @@ async function recoverChatPageAfterRefresh(client, {
 function buildChatScreeningProgressSnapshot(state = {}) {
   return {
     workflow: RUN_WORKFLOWS.CHAT_SCREENING,
-    targetCandidates: Math.max(1, state.targetCandidates || 1),
+    targetCandidates: state.scanAllCandidates ? null : Math.max(1, state.targetCandidates || 1),
+    scanAllCandidates: Boolean(state.scanAllCandidates),
     scanLimit: state.scanLimit || null,
     observedRows: state.observedRows || 0,
     processedCandidates: state.processedCandidates || 0,
@@ -1285,6 +1310,7 @@ function buildChatScreeningResult({
     unreadOnly,
     criteria,
     requestedCandidateLimit,
+    scanAllCandidates: requestedCandidateLimit === null,
     requestedScanLimit,
     observedRows,
     processedCandidates,

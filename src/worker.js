@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_ROBUSTNESS_MODE,
   DEFAULT_RECOMMEND_STEP_DELAY_MS,
   RUN_KINDS,
   RUN_WORKFLOWS
@@ -49,7 +50,12 @@ import {
   runSearchChatChain,
   summarizeSearchChatChain
 } from "./liepin/search-chat-chain.js";
-import { normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
+import {
+  createLongRunRuntime,
+  normalizeRobustnessMode,
+  parseHeartbeatIntervalMs
+} from "./long-run-runtime.js";
+import { isAllCandidateLimit, normalizeText, parsePositiveInteger, readJsonFile, writeJsonFile } from "./utils.js";
 
 export async function runWorker({
   workspaceRoot = getWorkspaceRoot(),
@@ -69,6 +75,15 @@ export async function runWorker({
     return;
   }
   const selectedWorkflow = normalizeText(snapshot.input?.workflow) || legacyWorkflowForKind(snapshot.kind);
+  const artifacts = snapshot.artifacts || getRunArtifactPaths(workspaceRoot, runId);
+  const robustnessRuntime = createLongRunRuntime({
+    mode: normalizeRobustnessMode(snapshot.input?.robustness_mode, DEFAULT_ROBUSTNESS_MODE),
+    workflow: selectedWorkflow,
+    runId,
+    checkpointPath: artifacts.checkpointPath,
+    heartbeatIntervalMs: parseHeartbeatIntervalMs(snapshot.input?.heartbeat_interval_ms),
+    appendEvent: (type, payload) => appendRunEvent(snapshot, type, payload)
+  });
 
   markRunRunning(workspaceRoot, runId);
   appendRunEvent(readRunState(workspaceRoot, runId), "worker_started", {
@@ -97,6 +112,7 @@ export async function runWorker({
     }
   };
   const onProgress = (event = {}) => {
+    robustnessRuntime.observeProgress(event);
     updateRunProgress(workspaceRoot, runId, event);
     if (event.partialResult) {
       lastPartialWorkflowResult = event.partialResult;
@@ -113,34 +129,42 @@ export async function runWorker({
       markRunPaused(workspaceRoot, runId, { stage: "before_browser_work" });
       return;
     }
+    robustnessRuntime.start();
 
     const result = await executeWorkflow({
       workspaceRoot,
       snapshot,
       executors,
       onProgress,
-      onSafeControlPoint
+      onSafeControlPoint,
+      robustnessRuntime
     });
-    markRunCompleted(workspaceRoot, runId, result);
+    robustnessRuntime.stop();
+    markRunCompleted(workspaceRoot, runId, robustnessRuntime.decorateResult(result));
   } catch (error) {
     const partialWorkflowResult = error?.partialResult || lastPartialWorkflowResult || null;
     if (error?.code === "RUN_PAUSED") {
-      markRunPaused(workspaceRoot, runId, partialWorkflowResult || {
+      robustnessRuntime.stop();
+      markRunPaused(workspaceRoot, runId, robustnessRuntime.decorateResult(partialWorkflowResult || {
         reason: "paused_by_operator"
-      });
+      }));
       return;
     }
     if (error?.code === "RUN_CANCELED") {
-      markRunCanceled(workspaceRoot, runId, partialWorkflowResult || {
+      robustnessRuntime.stop();
+      markRunCanceled(workspaceRoot, runId, robustnessRuntime.decorateResult(partialWorkflowResult || {
         reason: "canceled_by_operator"
-      });
+      }));
       return;
     }
+    const robustnessFailure = robustnessRuntime.recordFailure(error);
+    robustnessRuntime.stop();
     markRunFailed(workspaceRoot, runId, {
       code: error?.code || "WORKER_UNEXPECTED_ERROR",
-      message: error?.message || "Unexpected worker error"
+      message: error?.message || "Unexpected worker error",
+      robustnessFailure
     }, {
-      workflowResult: partialWorkflowResult
+      workflowResult: robustnessRuntime.decorateResult(partialWorkflowResult)
     });
   }
 }
@@ -150,7 +174,8 @@ export async function executeWorkflow({
   snapshot,
   executors = createDefaultExecutors(),
   onProgress = null,
-  onSafeControlPoint = null
+  onSafeControlPoint = null,
+  robustnessRuntime = null
 }) {
   const input = snapshot.input || {};
   const workflow = normalizeText(input.workflow) || legacyWorkflowForKind(snapshot.kind);
@@ -253,7 +278,9 @@ export async function executeWorkflow({
   if (workflow === RUN_WORKFLOWS.CHAT_SCREENING) {
     const llm = resolveChatScreeningLlm(workspaceRoot, input);
     const result = await executors.chatScreening({ port }, {
-      candidateLimit: parsePositiveInteger(input.candidate_limit, null),
+      candidateLimit: Object.hasOwn(input, "candidate_limit")
+        ? parseChatCandidateLimitInput(input.candidate_limit)
+        : undefined,
       scanLimit: parsePositiveInteger(input.scan_limit, null),
       jobTitle: normalizeText(input.job || input.job_title) || null,
       unreadOnly: parseBooleanInput(input.unread_only, null),
@@ -331,8 +358,16 @@ export async function executeWorkflow({
       config: llm.config,
       provider: llm.provider,
       checkpoint,
+      robustnessMode: robustnessRuntime?.mode || DEFAULT_ROBUSTNESS_MODE,
       onCheckpoint: async (checkpointPayload) => {
-        writeJsonFile(artifacts.checkpointPath, checkpointPayload);
+        const writer = async (payload) => {
+          writeJsonFile(artifacts.checkpointPath, payload);
+        };
+        if (robustnessRuntime?.enabled) {
+          await robustnessRuntime.recordCheckpointWrite(writer, checkpointPayload);
+          return;
+        }
+        await writer(checkpointPayload);
       },
       onSafeControlPoint,
       onProgress
@@ -521,6 +556,12 @@ function parseBooleanInput(value, fallback = null) {
   if (["true", "1", "yes", "on"].includes(normalized)) return true;
   if (["false", "0", "no", "off"].includes(normalized)) return false;
   return fallback;
+}
+
+function parseChatCandidateLimitInput(value) {
+  if (value === null || isAllCandidateLimit(value)) return null;
+  const parsed = parsePositiveInteger(value, null);
+  return parsed || undefined;
 }
 
 function createRunControlInterruptError({

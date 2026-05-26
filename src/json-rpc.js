@@ -44,7 +44,11 @@ import {
   requestCancel,
   requestPause
 } from "./run-state.js";
-import { normalizeText, parsePositiveInteger } from "./utils.js";
+import {
+  normalizeRobustnessMode,
+  parseHeartbeatIntervalMs
+} from "./long-run-runtime.js";
+import { isAllCandidateLimit, normalizeText, parsePositiveInteger } from "./utils.js";
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const workerScriptPath = path.join(path.dirname(currentFilePath), "worker.js");
@@ -275,6 +279,7 @@ function createStartTool(name, kind) {
         "This is the only correct start tool for chat-only tasks after collecting candidate_limit, job, unread_only, and criteria.",
         "Never call liepin_recommend_start or liepin_recommend_chat_start for chat-only tasks.",
         "`candidate_limit` means the target number of successful resume requests, not the number scanned or processed.",
+        "`candidate_limit` may be a positive integer or an all-candidates expression such as all, 全部, 所有, 扫到底, or 扫完所有人选; all-candidates means scan until the chat list bottom/platform limit.",
         "Before asking the user for arguments, call liepin_chat_options for job choices and current unread checkbox state.",
         "Chat page filtering only asks for `unread_only`; do not ask for recommend-page filters or date filters such as 3天内.",
         "`criteria` is the AI screening standard and is still required."
@@ -284,9 +289,11 @@ function createStartTool(name, kind) {
         properties: {
           debug_port: { type: "integer", minimum: 1 },
           candidate_limit: {
-            type: "integer",
-            minimum: 1,
-            description: "Target number of successful resume requests."
+            anyOf: [
+              { type: "integer", minimum: 1 },
+              { type: "string", minLength: 1 }
+            ],
+            description: "Target number of successful resume requests, or all/全部/所有/扫到底/扫完所有人选 to scan all candidates until the list bottom/platform limit."
           },
           scan_limit: {
             type: "integer",
@@ -390,7 +397,17 @@ function createStartTool(name, kind) {
         mock_chat_post_action: { type: "string" },
         execute_request_resume: { type: "boolean" },
         allow_chat_action: { type: "boolean" },
-        allow_request_resume: { type: "boolean" }
+        allow_request_resume: { type: "boolean" },
+        robustness_mode: {
+          type: "string",
+          enum: ["off", "observe", "recover"],
+          description: "Long-run robustness layer. Defaults to recover; off preserves legacy behavior; observe records heartbeats/timing/checkpoints without recovery decisions."
+        },
+        heartbeat_interval_ms: {
+          type: "integer",
+          minimum: 5000,
+          description: "Heartbeat interval for robustness_mode observe|recover. Values below 5000ms are clamped."
+        }
       },
       required: requiredStartArgsForKind(kind),
       additionalProperties: false
@@ -610,6 +627,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         chatUsage: {
           requiredStartArgs: ["candidate_limit", "job", "unread_only", "criteria"],
           jobSource: "jobs[].title",
+          candidateLimitMeaning: "正整数=目标成功索要简历人数；all/全部/所有/扫到底/扫完所有人选=扫完所有可见候选人直到列表底部或平台上限。",
           unreadOnlyMeaning: "true=勾选未读，只从未读开始；false=取消未读，扫全部会话",
           note: "liepin_chat_start 默认执行 chat_screening，会按岗位和未读设置准备页面。"
         },
@@ -718,6 +736,7 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         pid: worker.pid,
         state: "queued",
         workflow: input.workflow,
+        robustness_mode: input.robustness_mode,
         preflight: {
           ok: true,
           targetPage: preflight.targetPage,
@@ -919,7 +938,9 @@ function buildStartInput(kind, args = {}, defaultDebugPort = DEFAULT_DEBUG_PORT)
     ...args,
     debug_port: parsePositiveInteger(args.debug_port, defaultDebugPort),
     mock_llm: parseOptionalBooleanArg(args.mock_llm, false),
-    criteria: args.criteria || null
+    criteria: args.criteria || null,
+    robustness_mode: normalizeRobustnessMode(args.robustness_mode),
+    heartbeat_interval_ms: parseHeartbeatIntervalMs(args.heartbeat_interval_ms)
   };
   const requestedWorkflow = args.workflow || (kind === RUN_KINDS.CHAT ? RUN_WORKFLOWS.CHAT_SCREENING : null);
   if (requestedWorkflow === RUN_WORKFLOWS.CHAT_SCREENING) {
@@ -1044,7 +1065,7 @@ function buildChatScreeningStartInput(base = {}, args = {}) {
   return {
     ...base,
     workflow: RUN_WORKFLOWS.CHAT_SCREENING,
-    candidate_limit: requirePositiveIntegerArg(args.candidate_limit, "candidate_limit"),
+    candidate_limit: requireCandidateLimitArg(args.candidate_limit, "candidate_limit"),
     scan_limit: args.scan_limit || null,
     job: requireTextArg(args.job || args.job_title, "job"),
     unread_only: requireBooleanArg(args, "unread_only"),
@@ -1095,10 +1116,14 @@ function createSideEffectError(message) {
   return error;
 }
 
-function requirePositiveIntegerArg(value, name) {
+function requireCandidateLimitArg(value, name) {
+  if (value === undefined || value === null) {
+    throw new Error(`${name} is required and must be a positive integer or all.`);
+  }
+  if (isAllCandidateLimit(value)) return null;
   const parsed = parsePositiveInteger(value, null);
   if (!parsed) {
-    throw new Error(`${name} is required and must be a positive integer.`);
+    throw new Error(`${name} is required and must be a positive integer or all.`);
   }
   return parsed;
 }

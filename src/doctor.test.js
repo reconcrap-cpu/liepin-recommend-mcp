@@ -25,6 +25,26 @@ test("buildDoctorRecommendations suggests config template and Chrome launch fixe
   assert.equal(recommendations.some((item) => item.code === "START_CHROME_DEBUG"), true);
 });
 
+test("buildDoctorRecommendations suggests fixing reachable Chrome without required flags", () => {
+  const recommendations = buildDoctorRecommendations({
+    checks: [
+      { key: "chrome_required_flags", ok: false }
+    ],
+    chrome: {
+      ok: true,
+      loginOk: true,
+      riskBlocked: false,
+      pages: { recommend: { url: "https://lpt.liepin.com/recommend" } }
+    },
+    port: 9223,
+    targetPage: "recommend"
+  });
+
+  const fix = recommendations.find((item) => item.code === "FIX_CHROME_REQUIRED_FLAGS");
+  assert.equal(fix?.severity, "error");
+  assert.equal(fix?.command.includes("--debug-port 9223"), true);
+});
+
 test("buildDoctorRecommendations targets the requested page", () => {
   const recommendations = buildDoctorRecommendations({
     chrome: {

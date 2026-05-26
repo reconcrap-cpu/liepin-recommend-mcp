@@ -40,6 +40,8 @@ test("tools/list exposes liepin-prefixed tools", async () => {
   const recommendChatTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.recommendChatStart);
   assert.equal(recommendChatTool.inputSchema.properties.allow_chat_action.type, "boolean");
   assert.equal(recommendChatTool.inputSchema.properties.allow_request_resume.type, "boolean");
+  assert.deepEqual(recommendChatTool.inputSchema.properties.robustness_mode.enum, ["off", "observe", "recover"]);
+  assert.equal(recommendChatTool.inputSchema.properties.heartbeat_interval_ms.minimum, 5000);
   assert.equal(recommendChatTool.inputSchema.properties.candidate_limit.description.includes("pass"), true);
   assert.equal(
     response.result.tools
@@ -57,6 +59,8 @@ test("tools/list exposes liepin-prefixed tools", async () => {
   assert.equal(searchTool.inputSchema.properties.hide_read.type, "boolean");
   assert.deepEqual(searchTool.inputSchema.required, ["profile", "job", "hide_read", "criteria", "candidate_limit"]);
   const chatTool = response.result.tools.find((tool) => tool.name === TOOL_NAMES.chatStart);
+  assert.equal(Array.isArray(chatTool.inputSchema.properties.candidate_limit.anyOf), true);
+  assert.equal(chatTool.inputSchema.properties.candidate_limit.description.includes("全部"), true);
   assert.equal(chatTool.inputSchema.properties.unread_only.type, "boolean");
   assert.deepEqual(chatTool.inputSchema.required, ["candidate_limit", "job", "unread_only", "criteria"]);
   assert.equal(Object.hasOwn(chatTool.inputSchema.properties, "filter"), false);
@@ -178,7 +182,7 @@ test("run progress lists unified latest runs and filters by kind", async () => {
   }
 });
 
-test("recommend-chat start defaults to production click actions over JSON-RPC", async () => {
+test("recommend-chat start defaults to production click actions and recover robustness over JSON-RPC", async () => {
   const response = await handleJsonRpc({
     jsonrpc: "2.0",
     id: 3,
@@ -195,6 +199,43 @@ test("recommend-chat start defaults to production click actions over JSON-RPC", 
   assert.equal(response.result.isError, false);
   assert.equal(payload.status, "ACCEPTED");
   assert.equal(payload.workflow, RUN_WORKFLOWS.RECOMMEND_CHAT_CHAIN);
+  assert.equal(payload.robustness_mode, "recover");
+});
+
+test("recommend-chat start accepts observe robustness mode over JSON-RPC", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
+  const previous = process.env[ENV_HOME];
+  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  try {
+    const response = await handleJsonRpc({
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: {
+        name: TOOL_NAMES.recommendChatStart,
+        arguments: {
+          mock_llm: true,
+          candidate_limit: 1,
+          robustness_mode: "observe",
+          heartbeat_interval_ms: 1000
+        }
+      }
+    }, workspaceRoot, { spawnWorker: stubWorker, runDoctorFn: okDoctor });
+    const payload = JSON.parse(response.result.content[0].text);
+    assert.equal(response.result.isError, false);
+    assert.equal(payload.status, "ACCEPTED");
+    assert.equal(payload.robustness_mode, "observe");
+    const snapshot = readRunState(workspaceRoot, payload.run_id);
+    assert.equal(snapshot.input.robustness_mode, "observe");
+    assert.equal(snapshot.input.heartbeat_interval_ms, 5000);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ENV_HOME];
+    } else {
+      process.env[ENV_HOME] = previous;
+    }
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
 });
 
 test("recommend start defaults to production chain over JSON-RPC", async () => {
@@ -295,6 +336,46 @@ test("chat start accepts Trae-CN string boolean arguments", async () => {
   assert.equal(payload.workflow, RUN_WORKFLOWS.CHAT_SCREENING);
   assert.equal(observed[0].targetPage, "chat");
   assert.equal(observed[0].requireScreeningConfig, false);
+});
+
+test("chat start accepts all-candidates limit aliases over JSON-RPC", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
+  const previous = process.env[ENV_HOME];
+  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  try {
+    const response = await handleJsonRpc({
+      jsonrpc: "2.0",
+      id: 19,
+      method: "tools/call",
+      params: {
+        name: TOOL_NAMES.chatStart,
+        arguments: {
+          mock_llm: true,
+          candidate_limit: "扫完所有人选",
+          job: "全部职位",
+          unread_only: false,
+          criteria: "筛选条件",
+          allow_request_resume: true
+        }
+      }
+    }, workspaceRoot, {
+      spawnWorker: stubWorker,
+      runDoctorFn: okDoctor
+    });
+    const payload = JSON.parse(response.result.content[0].text);
+    assert.equal(response.result.isError, false);
+    assert.equal(payload.status, "ACCEPTED");
+    const snapshot = readRunState(workspaceRoot, payload.run_id);
+    assert.equal(snapshot.input.candidate_limit, null);
+    assert.equal(snapshot.input.workflow, RUN_WORKFLOWS.CHAT_SCREENING);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ENV_HOME];
+    } else {
+      process.env[ENV_HOME] = previous;
+    }
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
 });
 
 test("recommend start rejects chat-only arguments instead of running recommend", async () => {
@@ -520,10 +601,11 @@ test("doctor auto-fixes when a target page is requested over JSON-RPC", async ()
 test("doctor uses configured debugPort when debug_port is omitted", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
   const previous = process.env[ENV_HOME];
-  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  const stateHome = path.join(workspaceRoot, ".liepin-home");
+  process.env[ENV_HOME] = stateHome;
   try {
-    fs.mkdirSync(path.join(workspaceRoot, "config"), { recursive: true });
-    fs.writeFileSync(path.join(workspaceRoot, "config", "screening-config.json"), JSON.stringify({
+    fs.mkdirSync(stateHome, { recursive: true });
+    fs.writeFileSync(path.join(stateHome, "screening-config.json"), JSON.stringify({
       baseUrl: "https://example.com/v1",
       apiKey: "sk-test",
       model: "test-model",

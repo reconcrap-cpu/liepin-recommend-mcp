@@ -25,7 +25,7 @@ liepin-mcp skill export --format markdown
 liepin-mcp external-agent config
 liepin-mcp research discover --debug-port 9222
 liepin-mcp recommend start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
-liepin-mcp chat start --candidate-limit 5 --job "全部职位" --unread-only false --criteria "聊天筛选条件"
+liepin-mcp chat start --candidate-limit all --job "全部职位" --unread-only false --criteria "聊天筛选条件"
 liepin-mcp search start --profile "测试" --job "招聘实习生" --hide-read true --candidate-limit 5 --criteria "搜索筛选条件"
 liepin-mcp recommend-chat start --candidate-limit 5 --scan-limit 10 --recommend-criteria "推荐筛选条件" --chat-criteria "聊天筛选条件"
 liepin-mcp runs progress --kind chat --include-completed false
@@ -37,9 +37,28 @@ Doctor/start preflight will automatically handle fixable environment issues: ins
 - real recommend chat clicks are enabled by default,
 - real request-resume clicks are enabled by default.
 
+For chat start, `--candidate-limit` accepts a positive integer or all-candidates expressions such as `all`, `全部`, `所有`, and `扫到底`; all-candidates mode scans until the chat list bottom/platform limit.
+
 Use `--execute-request-resume false` or a dry-run workflow when you need no-side-effect validation.
 
 Use the MCP tool `liepin_run_progress` to query progress across recommend, search, chat, and recommend-chat runs. Pass `run_id` for one run, or omit it to list recent runs with optional `kind`, `limit`, and `include_completed` filters.
+
+### Long-run robustness
+
+Long-run recovery is enabled by default in the official release:
+
+```sh
+liepin-mcp recommend-chat start --candidate-limit 5 --scan-limit 10
+liepin-mcp search start --profile "测试" --job "招聘实习生" --hide-read true --candidate-limit 5 --criteria "搜索筛选条件"
+liepin-mcp chat start --candidate-limit all --job "全部职位" --unread-only false --criteria "聊天筛选条件"
+```
+
+Modes:
+- `recover`: default long-run behavior with heartbeat, timing, additive checkpoint metadata, and bounded safe-boundary recovery.
+- `observe`: records heartbeat, candidate timing, phase timing, and additive checkpoint metadata.
+- `off`: rollback-safe legacy behavior.
+
+Rollback is immediate: start the next run with `--robustness-mode off` or pin the package back to `@reconcrap/liepin-mcp@0.1.28`.
 
 ## Safety Notes
 

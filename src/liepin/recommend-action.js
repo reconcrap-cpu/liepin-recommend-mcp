@@ -8,9 +8,17 @@ import {
 import { DEFAULT_DEBUG_PORT, DEFAULT_RECOMMEND_STEP_DELAY_MS } from "../constants.js";
 import { normalizeText, sleep } from "../utils.js";
 import {
+  COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+  readChatCardLimitModal
+} from "./chat-card-limit.js";
+import {
   clearRecommendBlockingOverlaysToList,
   closeRecommendModalToList
 } from "./recommend-return.js";
+import {
+  closeSentGreetingUpsellModal,
+  readSentGreetingUpsellModal
+} from "./sent-greeting-upsell.js";
 import {
   assertPageRuntimeResponsive,
   isPageRuntimeUnresponsiveError
@@ -339,11 +347,34 @@ export async function waitForRecommendChatEntryVerification({
     if (sourceTarget?.kind === "recommend") {
       const client = await createPageClient(sourceTarget);
       try {
-        lastSnapshot = await readRecommendEmbeddedChatSnapshot(client, candidate);
-        if (lastSnapshot.sentGreetingFound && !lastSnapshot.hasChatEntry) {
-          await continueFromSentGreetingToBasicChat(client);
+        const chatCardLimitModal = await readChatCardLimitModal(client);
+        if (chatCardLimitModal.present) {
+          return {
+            verified: false,
+            reason: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+            quotaExhausted: true,
+            entryKind: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+            chatCardLimitModal,
+            target: sourceTarget
+          };
+        }
+        const sentGreetingUpsellModal = await readSentGreetingUpsellModal(client);
+        if (sentGreetingUpsellModal.present) {
+          const continueAction = await continueFromSentGreetingToBasicChat(client);
           await sleep(1500);
           lastSnapshot = await readRecommendEmbeddedChatSnapshot(client, candidate);
+          lastSnapshot.sentGreetingUpsellModal = {
+            ...sentGreetingUpsellModal,
+            continueAction
+          };
+        } else {
+          lastSnapshot = await readRecommendEmbeddedChatSnapshot(client, candidate);
+        }
+        if (lastSnapshot.sentGreetingFound && !lastSnapshot.hasChatEntry) {
+          const continueAction = await continueFromSentGreetingToBasicChat(client);
+          await sleep(1500);
+          lastSnapshot = await readRecommendEmbeddedChatSnapshot(client, candidate);
+          lastSnapshot.sentGreetingContinueAction = continueAction;
         }
         if (lastSnapshot.verified) {
           return {
@@ -434,7 +465,27 @@ export async function readRecommendEmbeddedChatSnapshot(client, candidate) {
     const basicChat = document.querySelector(".im-ui-basic-chat-modal, .im-ui-chat-modal-container");
     const sentGreetingModal = document.querySelector(".im-ui-recommend-chat-modal");
     const welcomePopover = document.querySelector(".popover-welcome-msg-body, .ant-lpt-popover.popover-welcom-msg");
-    const sentGreetingText = [getText(sentGreetingModal), getText(welcomePopover)].filter(Boolean).join(" ");
+    const isSentGreetingUpsellText = (value) => {
+      const text = getText({ textContent: value }).replace(/\s+/gu, "");
+      return text.includes("已向候选人发送消息")
+        && (
+          text.includes("更快获取人选回复")
+          || text.includes("超级聊聊权益")
+          || text.includes("加急通道触达")
+          || text.includes("免费发起")
+        );
+    };
+    const sentGreetingUpsellModal = [...new Set([
+      ...document.querySelectorAll(".ant-im-modal-content"),
+      ...document.querySelectorAll(".ant-im-modal"),
+      ...document.querySelectorAll(".ant-im-modal-wrap"),
+      ...document.querySelectorAll("[role='dialog']")
+    ])].find((node) => isVisible(node) && isSentGreetingUpsellText(getText(node))) || null;
+    const sentGreetingText = [
+      getText(sentGreetingModal),
+      getText(welcomePopover),
+      getText(sentGreetingUpsellModal)
+    ].filter(Boolean).join(" ");
     const headerName = getText(document.querySelector(".im-ui-basic-chat-header-name"));
     const headerBasicInfo = getText(document.querySelector(".im-ui-basic-chat-header-basic-info-content"));
     const headerUserInfo = getText(document.querySelector(".im-ui-basic-chat-header-user-info"));
@@ -456,6 +507,7 @@ export async function readRecommendEmbeddedChatSnapshot(client, candidate) {
     const sentGreetingFound = (
       isVisible(sentGreetingModal)
       || isVisible(welcomePopover)
+      || isVisible(sentGreetingUpsellModal)
     ) && /已向|发送消息/u.test(sentGreetingText);
     const hasChatEntry = basicChatFound && (headerBasicInfo.length > 0 || messageListText.length > 0 || actionBarText.length > 0);
     return {
@@ -465,6 +517,7 @@ export async function readRecommendEmbeddedChatSnapshot(client, candidate) {
       expectedName,
       basicChatFound,
       sentGreetingFound,
+      sentGreetingUpsellFound: isVisible(sentGreetingUpsellModal),
       sentGreetingText: sentGreetingText.slice(0, 300),
       headerName,
       headerBasicInfo,
@@ -483,19 +536,27 @@ export async function readRecommendEmbeddedChatSnapshot(client, candidate) {
 }
 
 async function continueFromSentGreetingToBasicChat(client) {
-  await client.evaluate(() => {
+  const upsellClose = await closeSentGreetingUpsellModal(client, {
+    timeoutMs: 1200
+  });
+  const genericClose = upsellClose.present ? null : await client.evaluate(() => {
     const close = document.querySelector(".im-ui-recommend-chat-modal .ant-im-modal-close")
       || document.querySelector(".ant-im-modal .ant-im-modal-close");
     if (close) close.click();
   });
   await sleep(800);
-  await client.evaluate((selectors) => {
+  const reopen = await client.evaluate((selectors) => {
     const button = document.querySelector(selectors.openChatButton);
     if (!button) return false;
     button.scrollIntoView({ block: "center" });
     button.click();
     return true;
   }, recommendSelectors);
+  return {
+    upsellClose,
+    genericClose,
+    reopened: Boolean(reopen)
+  };
 }
 
 async function readChatEntrySnapshot(client, candidate) {

@@ -13,6 +13,7 @@ import {
 import { runStructuredScreening, SCREENING_MODES } from "../llm-adapter.js";
 import { normalizeText, sha1, sleep } from "../utils.js";
 import { CHAT_ACTIONS, executeChatAction } from "./chat-action.js";
+import { COMMUNICATION_QUOTA_EXHAUSTED_STATUS } from "./chat-card-limit.js";
 import { buildChatScreenInput } from "./chat-screen-input.js";
 import { classifyChatScreeningEligibility } from "./chat-state-policy.js";
 import { auditCvPayloadCoverage, buildCvScreeningInput } from "./cv-payload.js";
@@ -67,6 +68,8 @@ export async function runRecommendChatChain({
   let skippedChatEntries = 0;
   let chainedCandidates = 0;
   let passedCandidates = 0;
+  let communicationQuotaExhausted = false;
+  let stopReason = "";
   const progressState = {
     targetCandidates: requestedCandidateLimit,
     scanLimit: requestedScanLimit,
@@ -85,6 +88,7 @@ export async function runRecommendChatChain({
     currentCandidateLabel: "",
     currentRowKey: "",
     currentEntryKind: "",
+    stopReason: "",
     lastItem: null
   };
   const buildPartialWorkflowResult = (stage, statusMessage) => {
@@ -110,6 +114,8 @@ export async function runRecommendChatChain({
       maxPayloadChars,
       violations,
       items,
+      communicationQuotaExhausted,
+      stopReason,
       stage,
       statusMessage,
       passed: false
@@ -170,7 +176,11 @@ export async function runRecommendChatChain({
       await ensureRecommendListReady(client);
       emitProgress("prepare_recommend_page", "已连接推荐页，开始推荐到聊天串联");
 
-      for (let scanIndex = 0; scanIndex < requestedScanLimit && passedCandidates < requestedCandidateLimit; scanIndex += 1) {
+      for (
+        let scanIndex = 0;
+        scanIndex < requestedScanLimit && passedCandidates < requestedCandidateLimit && !communicationQuotaExhausted;
+        scanIndex += 1
+      ) {
         emitProgress(
           "open_recommend_candidate",
           `正在处理第 ${scanIndex + 1}/${requestedScanLimit} 次扫描，目标通过 ${requestedCandidateLimit} 个候选人`,
@@ -299,6 +309,33 @@ export async function runRecommendChatChain({
           timeoutMs: chatEntryTimeoutMs
         });
         item.chatVerification = summarizeChatVerification(chatVerification);
+        if (chatVerification.quotaExhausted || chatVerification.reason === COMMUNICATION_QUOTA_EXHAUSTED_STATUS) {
+          communicationQuotaExhausted = true;
+          stopReason = COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
+          item.status = COMMUNICATION_QUOTA_EXHAUSTED_STATUS;
+          item.chatAction = {
+            action: "none",
+            executed: false,
+            clicked: false,
+            status: COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+            quotaExhausted: true
+          };
+          items.push(item);
+          finalizeItemProgress(item);
+          emitProgress(
+            COMMUNICATION_QUOTA_EXHAUSTED_STATUS,
+            "检测到购买开聊卡弹窗，沟通次数已达到上限，已停止猎聘推荐任务",
+            {
+              scannedCandidates: items.length,
+              chainedCandidates,
+              passedCandidates,
+              recommendLlmCalls,
+              recommendChatClicks,
+              stopReason
+            }
+          );
+          break;
+        }
         if (!chatVerification.verified) {
           const violation = {
             code: "chat_entry_not_verified",
@@ -485,7 +522,9 @@ export async function runRecommendChatChain({
         chatEntryTimeoutMs,
         maxPayloadChars,
         violations,
-        items
+        items,
+        communicationQuotaExhausted,
+        stopReason: stopReason || (passedCandidates >= requestedCandidateLimit ? "candidate_limit_reached" : "scan_limit_reached")
       });
       return {
         ...result,
@@ -616,7 +655,9 @@ export function evaluateRecommendChatChain(result = {}) {
   if (result.schemaVersion && result.schemaVersion !== RECOMMEND_CHAT_CHAIN_SCHEMA_VERSION) {
     failures.push("unsupported_schema_version");
   }
-  if ((result.passedCandidates || 0) < requested) failures.push("not_enough_passed_candidates");
+  if ((result.passedCandidates || 0) < requested && !result.communicationQuotaExhausted) {
+    failures.push("not_enough_passed_candidates");
+  }
   if (((result.samePageChatEntries || 0) + (result.chatPageEntries || 0)) < (result.chainedCandidates || 0)) {
     failures.push("verified_chat_entry_count_mismatch");
   }
@@ -625,6 +666,7 @@ export function evaluateRecommendChatChain(result = {}) {
   }
 
   for (const item of items) {
+    if (isCommunicationQuotaExhaustedItem(item)) continue;
     if (!item.recommendLlmCalled) failures.push(`candidate_${item.index}_recommend_llm_not_called`);
     if (shouldEnterChat(item.recommendDecision)) {
       if (!item.recommendChatAction?.clicked) failures.push(`candidate_${item.index}_recommend_chat_not_clicked`);
@@ -671,6 +713,8 @@ export function summarizeRecommendChatChain(result = {}) {
     requestResumeClicks: result.requestResumeClicks || 0,
     actionClicks: result.actionClicks || 0,
     executeRequestResume: Boolean(result.executeRequestResume),
+    communicationQuotaExhausted: Boolean(result.communicationQuotaExhausted),
+    stopReason: result.stopReason || "",
     violations: evaluation.failures
   };
 }
@@ -702,6 +746,7 @@ function buildRecommendChatChainProgressSnapshot(state = {}) {
     currentCandidateLabel: state.currentCandidateLabel || "",
     currentRowKey: state.currentRowKey || "",
     currentEntryKind: state.currentEntryKind || "",
+    stopReason: state.stopReason || "",
     lastItem: state.lastItem || null
   };
 }
@@ -728,6 +773,8 @@ function buildRecommendChatChainResult({
   maxPayloadChars,
   violations,
   items,
+  communicationQuotaExhausted = false,
+  stopReason = "",
   stage = null,
   statusMessage = null,
   passed = null
@@ -755,6 +802,8 @@ function buildRecommendChatChainResult({
     stepDelayMs,
     chatEntryTimeoutMs,
     maxPayloadChars,
+    communicationQuotaExhausted: Boolean(communicationQuotaExhausted),
+    stopReason,
     stage,
     statusMessage,
     violations: [...violations],
@@ -1051,6 +1100,7 @@ function summarizeChatVerification(chatVerification = {}) {
   return {
     verified: Boolean(chatVerification.verified),
     entryKind: chatVerification.entryKind || "",
+    quotaExhausted: Boolean(chatVerification.quotaExhausted),
     candidateNameMatched: Boolean(chatVerification.candidateNameMatched),
     hasRequestResumeButton: Boolean(chatVerification.hasRequestResumeButton),
     hasJumpToChatPage: Boolean(chatVerification.hasJumpToChatPage),
@@ -1060,6 +1110,7 @@ function summarizeChatVerification(chatVerification = {}) {
     actionBarText: chatVerification.actionBarText || "",
     messageListText: chatVerification.messageListText || "",
     reason: chatVerification.reason || "",
+    chatCardLimitModal: chatVerification.chatCardLimitModal || null,
     url: chatVerification.url || ""
   };
 }
@@ -1092,6 +1143,13 @@ function summarizeRecommendChatChainProgressItem(item = {}) {
     resumeState: item.chatState?.resumeState || "",
     actionStatus: item.chatAction?.status || item.recommendChatAction?.status || ""
   };
+}
+
+function isCommunicationQuotaExhaustedItem(item = {}) {
+  return item.status === COMMUNICATION_QUOTA_EXHAUSTED_STATUS
+    || item.chatVerification?.quotaExhausted
+    || item.chatVerification?.reason === COMMUNICATION_QUOTA_EXHAUSTED_STATUS
+    || item.chatAction?.quotaExhausted;
 }
 
 async function returnRecommendClientToList(client) {

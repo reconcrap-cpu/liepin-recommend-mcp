@@ -33,6 +33,7 @@ description: "Use when users want chat-only screening on Liepin chat page via @r
 - 用户确认 `candidate_limit/job/unread_only/criteria` 后，必须调用 `liepin_chat_start`，严禁调用 `liepin_recommend_start` 或 `liepin_recommend_chat_start`。
 - 如果下一步准备调用的工具名不是 `liepin_chat_start`，立即停止并改为 `liepin_chat_start`。
 - 拿到 `ACCEPTED + run_id` 后默认停止本轮，不自动高频轮询；用户要求查进度时优先调用 `liepin_run_progress`，有明确 `run_id` 时传入该 `run_id`。
+- 长跑鲁棒性默认启用 `robustness_mode="recover"`；默认不传即可使用 recover。只有需要复现旧行为时才显式传 `robustness_mode="off"`，需要只记录不恢复时传 `robustness_mode="observe"`。
 
 ## Required Inputs
 
@@ -43,10 +44,13 @@ description: "Use when users want chat-only screening on Liepin chat page via @r
 - `unread_only`（是否只扫“未读”：true/false）
 - `criteria`（开放式筛选条件，自然语言）
 
+`candidate_limit` 可以是正整数，也可以是全量扫描表达。用户说 `all`、`全部`、`所有`、`扫到底`、`扫完`、`扫完所有人选`、`扫描全部候选人`、`直到列表底部` 等意思时，传给 `liepin_chat_start` 的 `candidate_limit` 使用 `"all"` 或用户原词，表示扫完所有可见候选人直到列表底部/平台上限；不要再要求用户改成具体整数。
+
 可选但建议确认：
 
 - `scan_limit`
 - `max_chars`
+- `robustness_mode`：正式默认值是 `"recover"`；只有用户要复现旧行为时传 `"off"`，要做 observe 对照时传 `"observe"`。
 
 ## Response Style
 
