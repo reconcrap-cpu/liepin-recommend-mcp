@@ -601,10 +601,11 @@ test("doctor auto-fixes when a target page is requested over JSON-RPC", async ()
 test("doctor uses configured debugPort when debug_port is omitted", async () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
   const previous = process.env[ENV_HOME];
-  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  const stateHome = path.join(workspaceRoot, ".liepin-home");
+  process.env[ENV_HOME] = stateHome;
   try {
-    fs.mkdirSync(path.join(workspaceRoot, "config"), { recursive: true });
-    fs.writeFileSync(path.join(workspaceRoot, "config", "screening-config.json"), JSON.stringify({
+    fs.mkdirSync(stateHome, { recursive: true });
+    fs.writeFileSync(path.join(stateHome, "screening-config.json"), JSON.stringify({
       baseUrl: "https://example.com/v1",
       apiKey: "sk-test",
       model: "test-model",

@@ -167,6 +167,7 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
       request,
       disabledFeatures
     });
+    attachProviderRequestMetadata(request, requestBody, disabledFeatures);
     const timer = controller
       ? setTimeout(() => controller.abort(), timeoutMs)
       : null;
@@ -181,7 +182,7 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
         signal: controller?.signal
       });
       if (response.ok) {
-        return isStreamResponse(response)
+        return requestBody.stream === true || isStreamResponse(response)
           ? parseOpenAiCompatibleStream(response)
           : response.json();
       }
@@ -305,6 +306,29 @@ function selectCompatibilityDowngrade({
   if (requestBody.stream === true && !disabledFeatures.stream) return "stream";
   if (requestBody.reasoning_effort && !disabledFeatures.reasoningEffort) return "reasoningEffort";
   return null;
+}
+
+function attachProviderRequestMetadata(request, requestBody, disabledFeatures = {}) {
+  request.provider_request = {
+    endpoint: request.endpoint,
+    body_keys: Object.keys(requestBody),
+    body: sanitizeProviderRequestBody(requestBody),
+    compatibility_downgrades: Object.fromEntries(
+      Object.entries(disabledFeatures).filter(([, value]) => value === true)
+    )
+  };
+}
+
+function sanitizeProviderRequestBody(requestBody = {}) {
+  const sanitized = {};
+  for (const [key, value] of Object.entries(requestBody)) {
+    if (key === "messages") {
+      sanitized.messages_omitted = true;
+      continue;
+    }
+    sanitized[key] = value;
+  }
+  return sanitized;
 }
 
 function isStreamResponse(response) {

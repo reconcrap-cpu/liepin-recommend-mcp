@@ -4,7 +4,6 @@ import process from "node:process";
 
 import {
   DEFAULT_DEBUG_PORT,
-  ENV_CONFIG,
   ENV_DEBUG_PORT,
   getStateHome,
   RESEARCH_FILES,
@@ -43,11 +42,7 @@ export function ensureRuntimeLayout(workspaceRoot = getWorkspaceRoot()) {
 }
 
 export function resolveScreeningConfigPath(workspaceRoot = getWorkspaceRoot()) {
-  if (process.env[ENV_CONFIG]) {
-    return path.resolve(process.env[ENV_CONFIG]);
-  }
-  const workspaceConfig = path.join(path.resolve(workspaceRoot), "config", "screening-config.json");
-  if (fs.existsSync(workspaceConfig)) return workspaceConfig;
+  void workspaceRoot;
   return path.join(getStateHome(), "screening-config.json");
 }
 
