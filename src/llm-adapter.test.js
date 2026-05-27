@@ -399,7 +399,8 @@ test("runStructuredScreening retries transient OpenAI-compatible HTTP failures",
       baseUrl: "https://llm.example/v1",
       apiKey: "sk-test",
       model: "test-model",
-      llmMaxRetries: 1
+      llmMaxRetries: 1,
+      llmRetryDelayMs: 0
     },
     fetchImpl: async (_url, options) => {
       calls += 1;
@@ -435,4 +436,57 @@ test("runStructuredScreening retries transient OpenAI-compatible HTTP failures",
     post_action: "none"
   });
   assert.equal(Object.prototype.hasOwnProperty.call(payloads[0] || {}, "response_format"), false);
+});
+
+test("runStructuredScreening backs off on rate limits using Retry-After", async () => {
+  let calls = 0;
+  const delays = [];
+  const result = await runStructuredScreening({
+    mode: "recommend",
+    screenInput,
+    config: {
+      baseUrl: "https://llm.example/v1",
+      apiKey: "sk-test",
+      model: "test-model",
+      llmMaxRetries: 1,
+      llmRateLimitRetryDelayMs: 1000,
+      llmRetrySleep: async (delayMs) => delays.push(delayMs)
+    },
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: {
+            get: (name) => name.toLowerCase() === "retry-after" ? "3" : null
+          },
+          text: async () => "rate limited"
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: "pass",
+                  post_action: "chat"
+                })
+              }
+            }
+          ]
+        })
+      };
+    }
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [3000]);
+  assert.deepEqual(result.decision, {
+    decision: "pass",
+    post_action: "chat"
+  });
 });

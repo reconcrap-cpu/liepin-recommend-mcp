@@ -89,6 +89,9 @@ test("readScreeningConfig accepts boss-style llmThinkingLevel", () => {
     assert.equal(resolveScreeningConfigPath(workspaceRoot), path.join(stateHome, "screening-config.json"));
     assert.equal(resolution.config.model, "test-model");
     assert.equal(resolution.config.reasoningEffort, "low");
+    assert.equal(resolution.config.llmRetryDelayMs, 1000);
+    assert.equal(resolution.config.llmRateLimitRetryDelayMs, 30000);
+    assert.equal(resolution.config.llmRetryMaxDelayMs, 120000);
     assert.equal(resolution.config.llmSchemaMaxRetries, 1);
   } finally {
     if (previous === undefined) {

@@ -36,6 +36,13 @@ test("classifyLongRunFailure separates terminal and recoverable failures", () =>
     reason: "communication_quota_exhausted",
     recoverable: false
   });
+  const rateLimitError = new Error("LLM request failed: 429 Too Many Requests");
+  rateLimitError.code = "LLM_RATE_LIMITED";
+  assert.deepEqual(classifyLongRunFailure(rateLimitError), {
+    category: "terminal",
+    reason: "llm_rate_limited",
+    recoverable: false
+  });
 });
 
 test("observe runtime records candidate timing and unrefs heartbeat", () => {

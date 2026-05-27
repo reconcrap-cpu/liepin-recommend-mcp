@@ -65,6 +65,20 @@ export function classifyLongRunFailure(error) {
     };
   }
   if (
+    combined.includes("llm_rate_limited")
+    || combined.includes("429")
+    || combined.includes("too many requests")
+    || combined.includes("rate limit")
+    || combined.includes("rate_limit")
+    || combined.includes("限频")
+  ) {
+    return {
+      category: "terminal",
+      reason: "llm_rate_limited",
+      recoverable: false
+    };
+  }
+  if (
     combined.includes("runtime.evaluate")
     || combined.includes("timed out")
     || combined.includes("timeout")

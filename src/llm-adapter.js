@@ -3,6 +3,10 @@ import path from "node:path";
 
 import { ensureDirSync, normalizeText } from "./utils.js";
 
+const DEFAULT_LLM_RETRY_DELAY_MS = 1000;
+const DEFAULT_LLM_RATE_LIMIT_RETRY_DELAY_MS = 30000;
+const DEFAULT_LLM_RETRY_MAX_DELAY_MS = 120000;
+
 export const SCREENING_MODES = {
   RECOMMEND: "recommend",
   CHAT: "chat"
@@ -200,17 +204,21 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
         continue;
       }
       const error = new Error(`LLM request failed: ${response.status} ${response.statusText}`);
+      error.code = response.status === 429 ? "LLM_RATE_LIMITED" : `LLM_HTTP_${response.status}`;
       error.status = response.status;
       error.body = responseText;
+      error.retryAfterMs = parseRetryAfterMs(readHeader(response.headers, "retry-after"));
       lastError = error;
       if (!isRetriableStatus(response.status) || attempt >= maxRetries) {
         throw error;
       }
+      await waitBeforeLlmRetry({ config, response, error, attempt });
     } catch (error) {
       lastError = normalizeFetchError(error, attempt, maxRetries);
       if (!shouldRetryError(error) || attempt >= maxRetries) {
         throw lastError;
       }
+      await waitBeforeLlmRetry({ config, error: lastError, attempt });
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -681,6 +689,68 @@ function normalizeFetchError(error, attempt, maxRetries) {
     return new Error(`LLM request timed out${attempt < maxRetries ? ", retrying" : ""}`);
   }
   return error;
+}
+
+async function waitBeforeLlmRetry({
+  config,
+  response = null,
+  error = null,
+  attempt = 0
+} = {}) {
+  const delayMs = computeLlmRetryDelayMs({
+    config,
+    response,
+    error,
+    attempt
+  });
+  if (delayMs <= 0) return;
+  if (typeof config?.llmRetrySleep === "function") {
+    await config.llmRetrySleep(delayMs);
+    return;
+  }
+  await sleep(delayMs);
+}
+
+function computeLlmRetryDelayMs({
+  config,
+  response = null,
+  error = null,
+  attempt = 0
+} = {}) {
+  const status = typeof response?.status === "number" ? response.status : error?.status;
+  const retryAfterMs = error?.retryAfterMs ?? parseRetryAfterMs(readHeader(response?.headers, "retry-after"));
+  const baseDelayMs = status === 429
+    ? parseNonNegativeInteger(config?.llmRateLimitRetryDelayMs, DEFAULT_LLM_RATE_LIMIT_RETRY_DELAY_MS)
+    : parseNonNegativeInteger(config?.llmRetryDelayMs, DEFAULT_LLM_RETRY_DELAY_MS);
+  const maxDelayMs = parsePositiveInteger(config?.llmRetryMaxDelayMs, DEFAULT_LLM_RETRY_MAX_DELAY_MS);
+  const exponentialDelayMs = baseDelayMs * (2 ** Math.max(0, attempt));
+  const requestedDelayMs = Math.max(exponentialDelayMs, retryAfterMs || 0);
+  return Math.min(maxDelayMs, requestedDelayMs);
+}
+
+function readHeader(headers, name) {
+  if (!headers || !name) return "";
+  if (typeof headers.get === "function") {
+    return headers.get(name) || headers.get(name.toLowerCase()) || "";
+  }
+  const direct = headers[name] || headers[name.toLowerCase()];
+  return direct === undefined || direct === null ? "" : String(direct);
+}
+
+function parseRetryAfterMs(value, now = Date.now()) {
+  const raw = normalizeText(value);
+  if (!raw) return 0;
+  const seconds = Number.parseFloat(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds * 1000);
+  }
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp)) return 0;
+  return Math.max(0, timestamp - now);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseJsonObjectContent(content) {

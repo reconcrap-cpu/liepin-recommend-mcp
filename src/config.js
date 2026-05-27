@@ -171,6 +171,9 @@ export function readScreeningConfig(workspaceRoot = getWorkspaceRoot()) {
       )),
       llmTimeoutMs: parsePositiveInteger(parsed.llmTimeoutMs, 120000),
       llmMaxRetries: parsePositiveInteger(parsed.llmMaxRetries, 2),
+      llmRetryDelayMs: parsePositiveInteger(parsed.llmRetryDelayMs, 1000),
+      llmRateLimitRetryDelayMs: parsePositiveInteger(parsed.llmRateLimitRetryDelayMs, 30000),
+      llmRetryMaxDelayMs: parsePositiveInteger(parsed.llmRetryMaxDelayMs, 120000),
       llmSchemaMaxRetries: parsePositiveInteger(parsed.llmSchemaMaxRetries, 1)
     },
     ...resolution
@@ -196,7 +199,10 @@ export function createScreeningConfigTemplate() {
     reasoningStream: true,
     llmExtraBody: {},
     llmTimeoutMs: 120000,
-    llmMaxRetries: 2
+    llmMaxRetries: 2,
+    llmRetryDelayMs: 1000,
+    llmRateLimitRetryDelayMs: 30000,
+    llmRetryMaxDelayMs: 120000
   };
 }
 
