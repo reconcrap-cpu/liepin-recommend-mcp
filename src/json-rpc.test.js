@@ -62,10 +62,12 @@ test("tools/list exposes liepin-prefixed tools", async () => {
   assert.equal(Array.isArray(chatTool.inputSchema.properties.candidate_limit.anyOf), true);
   assert.equal(chatTool.inputSchema.properties.candidate_limit.description.includes("全部"), true);
   assert.equal(chatTool.inputSchema.properties.unread_only.type, "boolean");
-  assert.deepEqual(chatTool.inputSchema.required, ["candidate_limit", "job", "unread_only", "criteria"]);
+  assert.deepEqual(chatTool.inputSchema.required, ["candidate_limit", "job", "unread_only"]);
+  assert.equal(chatTool.inputSchema.properties.criteria.description.includes("collect_cv"), true);
   assert.equal(Object.hasOwn(chatTool.inputSchema.properties, "filter"), false);
   assert.equal(chatTool.description.includes("liepin_recommend_filter_options"), false);
   assert.equal(chatTool.description.includes("unread_only"), true);
+  assert.equal(chatTool.description.includes("collect_cv"), true);
 });
 
 test("run status returns compact run payload by default", async () => {
@@ -306,6 +308,53 @@ test("chat start defaults to chat screening over JSON-RPC", async () => {
   assert.equal(observed[0].requireScreeningConfig, false);
 });
 
+test("chat start without criteria enters collect-CV mode over JSON-RPC", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-json-rpc-"));
+  const previous = process.env[ENV_HOME];
+  process.env[ENV_HOME] = path.join(workspaceRoot, ".liepin-home");
+  const observed = [];
+  try {
+    const response = await handleJsonRpc({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: {
+        name: TOOL_NAMES.chatStart,
+        arguments: {
+          candidate_limit: 2,
+          job: "全部职位",
+          unread_only: false,
+          allow_request_resume: true
+        }
+      }
+    }, workspaceRoot, {
+      spawnWorker: stubWorker,
+      runDoctorFn: async (options = {}) => {
+        observed.push(options);
+        return okDoctor(options);
+      }
+    });
+    const payload = JSON.parse(response.result.content[0].text);
+    assert.equal(response.result.isError, false);
+    assert.equal(payload.status, "ACCEPTED");
+    assert.equal(payload.workflow, RUN_WORKFLOWS.CHAT_SCREENING);
+    assert.equal(observed[0].targetPage, "chat");
+    assert.equal(observed[0].requireScreeningConfig, false);
+    const snapshot = readRunState(workspaceRoot, payload.run_id);
+    assert.equal(snapshot.input.criteria, null);
+    assert.equal(snapshot.input.mock_llm, false);
+    assert.equal(snapshot.input.human_behavior.restLevel, "high");
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ENV_HOME];
+    } else {
+      process.env[ENV_HOME] = previous;
+    }
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+
 test("chat start accepts Trae-CN string boolean arguments", async () => {
   const observed = [];
   const response = await handleJsonRpc({
@@ -355,6 +404,7 @@ test("chat start accepts all-candidates limit aliases over JSON-RPC", async () =
           job: "全部职位",
           unread_only: false,
           criteria: "筛选条件",
+          rest_level: "low",
           allow_request_resume: true
         }
       }
@@ -368,6 +418,7 @@ test("chat start accepts all-candidates limit aliases over JSON-RPC", async () =
     const snapshot = readRunState(workspaceRoot, payload.run_id);
     assert.equal(snapshot.input.candidate_limit, null);
     assert.equal(snapshot.input.workflow, RUN_WORKFLOWS.CHAT_SCREENING);
+    assert.equal(snapshot.input.human_behavior.restLevel, "low");
   } finally {
     if (previous === undefined) {
       delete process.env[ENV_HOME];

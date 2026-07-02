@@ -49,6 +49,7 @@ import {
 import { collectChatConversationStates, sampleChatResumeDetailResumes } from "./liepin/chat-sampler.js";
 import { collectChatScreenInputs } from "./liepin/chat-screen-input.js";
 import {
+  DEFAULT_CHAT_REST_LEVEL,
   runChatScreening,
   summarizeChatScreening
 } from "./liepin/chat-screening.js";
@@ -258,7 +259,7 @@ export async function runCli(argv = process.argv.slice(2)) {
       fix: true,
       requireChatPage: targetPageForCliStart(command, input) === "chat",
       targetPage: targetPageForCliStart(command, input),
-      requireScreeningConfig: !input.mock_llm
+      requireScreeningConfig: requiresScreeningConfigForCliStart(input)
     });
     if (!preflight.ok) {
       printJson({
@@ -577,16 +578,20 @@ async function runResearchCommand(subcommand, flags, workspaceRoot = getWorkspac
       needsRequestResume: true,
       allowRequestResume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false)
     });
-    const llm = resolveChatScreeningLlm(flags);
+    const criteria = normalizeText(flags.criteria || flags["chat-criteria"] || flags.chatCriteria) || null;
+    const llm = criteria
+      ? resolveChatScreeningLlm(flags)
+      : { config: null, provider: null };
     const result = await runChatScreening({ port }, {
       candidateLimit: requireCandidateLimitFlag(flags["candidate-limit"] || flags.candidateLimit, "--candidate-limit"),
       scanLimit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
       jobTitle: requireTextFlag(flags.job || flags["job-title"] || flags.jobTitle, "--job"),
       unreadOnly: parseRequiredBooleanFlag(flags["unread-only"] ?? flags.unreadOnly, "--unread-only"),
-      criteria: requireTextFlag(flags.criteria || flags["chat-criteria"] || flags.chatCriteria, "--criteria"),
+      criteria,
       maxPayloadChars: parsePositiveInteger(flags.maxChars || flags["max-chars"], null),
       config: llm.config,
-      provider: llm.provider
+      provider: llm.provider,
+      humanBehavior: buildChatHumanBehaviorInputFromFlags(flags)
     });
     printJson({ ok: result.passed, summary: summarizeChatScreening(result), result });
     if (!result.passed) process.exitCode = 1;
@@ -929,6 +934,7 @@ function parseStartInputFlags(kind, flags, defaultDebugPort = DEFAULT_DEBUG_PORT
     mock_reasoning: normalizeText(flags["mock-reasoning"] || flags.mockReasoning),
     allow_chat_action: parseOptionalBoolean(flags["allow-chat-action"] || flags.allowChatAction, false),
     allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, false),
+    human_behavior: buildChatHumanBehaviorInputFromFlags(flags),
     robustness_mode: normalizeRobustnessMode(
       flags["robustness-mode"] || flags.robustnessMode || flags.robustness_mode
     ),
@@ -1031,14 +1037,38 @@ function buildChatScreeningStartInputFlags(base, flags) {
     scan_limit: parsePositiveInteger(flags["scan-limit"] || flags.scanLimit, null),
     job: requireTextFlag(flags.job || flags["job-title"] || flags.jobTitle, "--job"),
     unread_only: parseRequiredBooleanFlag(flags["unread-only"] ?? flags.unreadOnly, "--unread-only"),
-    criteria: requireTextFlag(flags.criteria || flags["chat-criteria"] || flags.chatCriteria, "--criteria"),
+    criteria: normalizeText(flags.criteria || flags["chat-criteria"] || flags.chatCriteria) || null,
     execute_request_resume: true,
     allow_chat_action: false,
     allow_request_resume: parseOptionalBoolean(flags["allow-request-resume"] || flags.allowRequestResume, true),
+    human_behavior: buildChatHumanBehaviorInputFromFlags(flags),
     mock_decision: base.mock_decision || "fail",
     mock_post_action: base.mock_post_action || "none",
     mock_chat_decision: normalizeText(flags["mock-chat-decision"] || flags.mockChatDecision || base.mock_decision) || "fail",
     mock_chat_post_action: normalizeText(flags["mock-chat-post-action"] || flags.mockChatPostAction || base.mock_post_action) || "none"
+  };
+}
+
+function buildChatHumanBehaviorInputFromFlags(flags = {}) {
+  const restLevel = normalizeText(
+    flags["rest-level"]
+    || flags.restLevel
+    || flags.rest_level
+    || flags["human-behavior-rest-level"]
+    || flags.humanBehaviorRestLevel
+    || flags.human_behavior_rest_level
+  ) || normalizeText(process.env.SOURCING_LIEPIN_CHAT_REST_LEVEL)
+    || normalizeText(process.env.SOURCING_BOSS_CHAT_REST_LEVEL)
+    || DEFAULT_CHAT_REST_LEVEL;
+  const enabled = parseOptionalBoolean(
+    flags["human-behavior-enabled"]
+    ?? flags.humanBehaviorEnabled
+    ?? flags.human_behavior_enabled,
+    null
+  );
+  return {
+    restLevel,
+    ...(enabled === null ? {} : { enabled })
   };
 }
 
@@ -1126,7 +1156,7 @@ function assertCliNotChatOnlyMisroute(command, flags = {}) {
     || workflow === RUN_WORKFLOWS.CHAT_SAMPLE;
   if (!hasUnreadOnly && !hasChatWorkflow) return;
   throw new Error(
-    "检测到 chat-only 参数被提交到了推荐页命令。聊天页筛选必须使用 `chat start --candidate-limit <n> --job <岗位> --unread-only true|false --criteria <条件>`。"
+    "检测到 chat-only 参数被提交到了推荐页命令。聊天页任务必须使用 `chat start --candidate-limit <n> --job <岗位> --unread-only true|false [--criteria <条件>]`；criteria 留空时进入 collect-CV 模式。"
   );
 }
 
@@ -1160,7 +1190,7 @@ function buildHelp() {
     "  provider check [--mode both|recommend|chat]",
     "  recommend start [--debug-port 9222] [--candidate-limit 20] [--scan-limit 20] [--tab 推荐] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false] [--robustness-mode off|observe|recover; default recover]",
     "  search start [--debug-port 9222] --profile <搜索profile> --job <岗位> --hide-read true|false [--candidate-limit 5] [--scan-limit 20] [--criteria \"筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--robustness-mode off|observe|recover; default recover]",
-    "  chat start [--debug-port 9222] --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--max-chars 12000] [--mock-llm] [--allow-request-resume true|false] [--robustness-mode off|observe|recover; default recover]",
+    "  chat start [--debug-port 9222] --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false [--criteria \"筛选条件\"; omitted = collect CV] [--scan-limit 20] [--max-chars 12000] [--rest-level low|medium|high; default high] [--mock-llm] [--allow-request-resume true|false] [--robustness-mode off|observe|recover; default recover]",
     "  recommend-chat start [--debug-port 9222] [--candidate-limit 5] [--scan-limit 10] [--filter 沿用页面当前筛选] [--recommend-criteria \"推荐筛选条件\"] [--chat-criteria \"聊天筛选条件\"] [--mock-llm] [--allow-chat-action true|false] [--execute-request-resume true|false] [--allow-request-resume true|false] [--robustness-mode off|observe|recover; default recover]",
     "  runs list [--full]",
     "  runs progress [--kind recommend|search|chat|recommend-chat] [--include-completed true|false] [--limit 5] [--full]",
@@ -1190,7 +1220,7 @@ function buildHelp() {
     "  research chat-screen-inputs --limit 10 [--filter 有简历]",
     "  research chat-policy-audit --limit 20 [--filter 有简历]",
     "  research chat-action --action none|request_resume [--row-key <key>] [--row-index <n>] [--allow-request-resume]",
-    "  research chat-screening --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false --criteria \"筛选条件\" [--scan-limit 20] [--mock-llm] --allow-request-resume",
+    "  research chat-screening --candidate-limit <n|all|全部|所有|扫到底> --job <岗位> --unread-only true|false [--criteria \"筛选条件\"; omitted = collect CV] [--scan-limit 20] [--mock-llm] --allow-request-resume",
     "  research cv-survey --minimum 50 --batch 10 [--per-pass 10] [--rounds 4] [--no-progress]",
     "  research parse-survey --file <cv-structure-survey.json>",
     "  research audit-payload --file <cv-structure-survey.json> [--limit 10]"
@@ -1208,6 +1238,14 @@ function targetPageForCliStart(kind, input = {}) {
     return "chat";
   }
   return "recommend";
+}
+
+function requiresScreeningConfigForCliStart(input = {}) {
+  if (input.mock_llm) return false;
+  if (input.workflow === RUN_WORKFLOWS.CHAT_SCREENING && !normalizeText(input.criteria)) {
+    return false;
+  }
+  return true;
 }
 
 function runKindForWorkflow(kind, workflow) {

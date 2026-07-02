@@ -476,8 +476,32 @@ export async function readChatListSnapshot(client) {
       clientHeight: Math.round(clientHeight),
       atBottom: Boolean(scroller && scrollTop + clientHeight >= scrollHeight - 3),
       maxContactsVisible: isVisible(maxContacts),
-      maxContactsText: (maxContacts?.innerText || maxContacts?.textContent || "").replace(/\s+/g, " ").trim()
+      maxContactsText: (maxContacts?.innerText || maxContacts?.textContent || "").replace(/\s+/g, " ").trim(),
+      rows: rows.map((row, index) => summarizeChatListRow(row, index))
     };
+
+    function summarizeChatListRow(row, index) {
+      const rowText = getText(row);
+      const rowType = row.classList.contains("im-ui-custom-contact-item") || rowText.startsWith("收到简历")
+        ? "system"
+        : "candidate";
+      const encodedExt = row.getAttribute("data-tlg-ext") || "";
+      let contactId = "";
+      try {
+        contactId = JSON.parse(decodeURIComponent(encodedExt)).to_imid || "";
+      } catch {}
+      return {
+        index,
+        rowIndex: index,
+        rowKey: contactId || `${rowType}:${rowText.slice(0, 120)}`,
+        rowType,
+        rowText: rowText.slice(0, 300)
+      };
+    }
+
+    function getText(node) {
+      return (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
+    }
 
     function findChatListScroller(rowSelector) {
       const firstRow = document.querySelector(rowSelector);

@@ -102,7 +102,7 @@ export function buildCandidateRows(workflow, items = []) {
 }
 
 function buildCandidateRow(workflow, item = {}) {
-  if (!wasLlmScreened(item)) return null;
+  if (!isReportableCandidateItem(item)) return null;
   const recommendDecision = item.recommendDecision || (
     !isChatOnlyWorkflow(workflow) ? item.decision : null
   );
@@ -154,8 +154,14 @@ function buildCandidateRow(workflow, item = {}) {
   };
 }
 
-function wasLlmScreened(item = {}) {
-  return Boolean(item.llmCalled || item.recommendLlmCalled || item.chatLlmCalled);
+function isReportableCandidateItem(item = {}) {
+  return Boolean(
+    item.llmCalled
+    || item.recommendLlmCalled
+    || item.chatLlmCalled
+    || item.collectionMode
+    || item.cvCollection
+  );
 }
 
 function resolveWorkflow(workflowResult = {}) {

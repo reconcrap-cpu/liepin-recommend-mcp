@@ -36,7 +36,8 @@ export const chatSelectors = {
   resumeDetailModalPrintable: '[class*="resume-detail-modal-wrap"] .resume-detail-content-body.printable-content, [class*="resume-detail-modal-wrap"] .printable-content',
   resumeDetailModalCloseButton: '[class*="resume-detail-modal-wrap"] [class*="closeBtn"], [class*="resume-detail-modal-wrap"] [class*="antlpticon-close"]',
   requestResumeConfirmModal: ".ant-im-modal, [role=\"dialog\"]",
-  requestResumeSuccessMessage: ".im-ui-message-list-wrapper.im-ui-chat-list .im-ui-message-item-normal-message-wrapper, .im-ui-msg-list-content .im-ui-message-item-normal-message-wrapper"
+  requestResumeSuccessMessage: ".im-ui-message-list-wrapper.im-ui-chat-list .im-ui-message-item-normal-message-wrapper, .im-ui-msg-list-content .im-ui-message-item-normal-message-wrapper",
+  toastMessage: ".ant-im-message, .ant-im-notification, .ant-lpt-message, .ant-lpt-notification, [class*=\"toast\"], [class*=\"notification\"]"
 };
 
 export const resumeDetailSelectors = {

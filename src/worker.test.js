@@ -187,7 +187,10 @@ test("runWorker executes chat screening workflow with required chat inputs", asy
         scan_limit: 5,
         job: "全部职位",
         unread_only: false,
-        criteria: "筛选条件"
+        criteria: "筛选条件",
+        human_behavior: {
+          restLevel: "medium"
+        }
       }
     });
 
@@ -201,6 +204,7 @@ test("runWorker executes chat screening workflow with required chat inputs", asy
           assert.equal(options.jobTitle, "全部职位");
           assert.equal(options.unreadOnly, false);
           assert.equal(options.criteria, "筛选条件");
+          assert.equal(options.humanBehavior.human_behavior.restLevel, "medium");
           return {
             passed: true,
             requestedCandidateLimit: 2,
@@ -283,6 +287,73 @@ test("runWorker passes all-candidates chat limit through as unlimited", async ()
     const stored = readRunState(workspaceRoot, snapshot.run_id);
     assert.equal(stored.state, "completed");
     assert.equal(stored.result.summary.targetRequestResumeSuccesses, null);
+  });
+});
+
+test("runWorker executes chat collect-CV workflow without screening config", async () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "liepin-worker-"));
+  await withRuntimeHome(workspaceRoot, async () => {
+    const snapshot = createRunSnapshot({
+      workspaceRoot,
+      kind: RUN_KINDS.CHAT,
+      phase: "P31",
+      input: {
+        workflow: RUN_WORKFLOWS.CHAT_SCREENING,
+        candidate_limit: 2,
+        scan_limit: 5,
+        job: "全部职位",
+        unread_only: false,
+        criteria: null
+      }
+    });
+
+    await runWorker({
+      workspaceRoot,
+      runId: snapshot.run_id,
+      executors: {
+        chatScreening: async (_browser, options) => {
+          assert.equal(options.candidateLimit, 2);
+          assert.equal(options.scanLimit, 5);
+          assert.equal(options.jobTitle, "全部职位");
+          assert.equal(options.unreadOnly, false);
+          assert.equal(options.criteria, null);
+          assert.equal(options.config, null);
+          assert.equal(options.provider, null);
+          return {
+            passed: true,
+            mode: "collect_cv",
+            requestedCandidateLimit: 2,
+            requestResumeSuccesses: 1,
+            cvCollectionFulfillments: 2,
+            alreadyRequestedCvCount: 1,
+            alreadyAvailableCvCount: 0,
+            processedCandidates: 2,
+            screenableCandidates: 0,
+            skippedRows: 0,
+            llmCalls: 0,
+            actionClicks: 1,
+            stopReason: "candidate_limit_reached",
+            violations: [],
+            items: [
+              {
+                rowIndex: 0,
+                rowKey: "chat-row-1",
+                status: "cv_request_already_sent",
+                collectionMode: true,
+                decision: { decision: "pass", post_action: "none", screening_mode: "collect_cv" },
+                beforeState: { candidateName: "张先生" }
+              }
+            ]
+          };
+        }
+      }
+    });
+
+    const stored = readRunState(workspaceRoot, snapshot.run_id);
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.result.summary.mode, "collect_cv");
+    assert.equal(stored.result.summary.cvCollectionFulfillments, 2);
+    assert.equal(stored.result.summary.llmCalls, 0);
   });
 });
 

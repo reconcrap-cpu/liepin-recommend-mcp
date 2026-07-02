@@ -276,7 +276,10 @@ export async function executeWorkflow({
   }
 
   if (workflow === RUN_WORKFLOWS.CHAT_SCREENING) {
-    const llm = resolveChatScreeningLlm(workspaceRoot, input);
+    const normalizedCriteria = normalizeText(input.criteria) || null;
+    const llm = normalizedCriteria
+      ? resolveChatScreeningLlm(workspaceRoot, input)
+      : { config: null, provider: null };
     const result = await executors.chatScreening({ port }, {
       candidateLimit: Object.hasOwn(input, "candidate_limit")
         ? parseChatCandidateLimitInput(input.candidate_limit)
@@ -285,9 +288,10 @@ export async function executeWorkflow({
       jobTitle: normalizeText(input.job || input.job_title) || null,
       unreadOnly: parseBooleanInput(input.unread_only, null),
       maxPayloadChars: parsePositiveInteger(input.max_chars, null),
-      criteria: normalizeText(input.criteria) || null,
+      criteria: normalizedCriteria,
       config: llm.config,
       provider: llm.provider,
+      humanBehavior: input,
       onProgress
     });
     return {

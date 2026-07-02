@@ -34,6 +34,7 @@ import {
   discoverChatOptions,
   summarizeChatOptions
 } from "./liepin/chat-options.js";
+import { DEFAULT_CHAT_REST_LEVEL } from "./liepin/chat-screening.js";
 import {
   buildRunStatusPayload,
   clearPauseRequest,
@@ -270,19 +271,32 @@ function createTools() {
   ];
 }
 
+function createChatHumanBehaviorInputSchema(description) {
+  return {
+    type: "object",
+    description,
+    properties: {
+      enabled: { type: "boolean" },
+      restLevel: { type: "string", enum: ["low", "medium", "high", "aggressive", "off"] },
+      rest_level: { type: "string", enum: ["low", "medium", "high", "aggressive", "off"] }
+    },
+    additionalProperties: true
+  };
+}
+
 function createStartTool(name, kind) {
   if (kind === RUN_KINDS.CHAT) {
     return {
       name,
       description: [
         "Create an async Liepin chat-page screening run.",
-        "This is the only correct start tool for chat-only tasks after collecting candidate_limit, job, unread_only, and criteria.",
+        "This is the only correct start tool for chat-only tasks after collecting candidate_limit, job, and unread_only.",
         "Never call liepin_recommend_start or liepin_recommend_chat_start for chat-only tasks.",
-        "`candidate_limit` means the target number of successful resume requests, not the number scanned or processed.",
+        "`candidate_limit` means the target number of successful resume requests or already-fulfilled CV collection outcomes, not the number scanned or processed.",
         "`candidate_limit` may be a positive integer or an all-candidates expression such as all, 全部, 所有, 扫到底, or 扫完所有人选; all-candidates means scan until the chat list bottom/platform limit.",
         "Before asking the user for arguments, call liepin_chat_options for job choices and current unread checkbox state.",
         "Chat page filtering only asks for `unread_only`; do not ask for recommend-page filters or date filters such as 3天内.",
-        "`criteria` is the AI screening standard and is still required."
+        "`criteria` is the AI screening standard; when it is omitted or blank, the run enters collect_cv mode and requests CVs from candidates that have not already been requested."
       ].join(" "),
       inputSchema: {
         type: "object",
@@ -311,7 +325,7 @@ function createStartTool(name, kind) {
           },
           criteria: {
             type: "string",
-            description: "AI screening standard, not a page filter."
+            description: "Optional AI screening standard, not a page filter. Omit or pass blank to enter collect_cv mode."
           },
           chat_criteria: { type: "string" },
           max_chars: { type: "integer", minimum: 1 },
@@ -321,9 +335,17 @@ function createStartTool(name, kind) {
           mock_post_action: { type: "string" },
           mock_chat_decision: { type: "string" },
           mock_chat_post_action: { type: "string" },
+          human_behavior: createChatHumanBehaviorInputSchema("Optional chat pacing/rest policy. Defaults to aggressive/high."),
+          humanBehavior: createChatHumanBehaviorInputSchema("Compatibility field; prefer human_behavior."),
+          rest_level: { type: "string", enum: ["low", "medium", "high", "aggressive", "off"] },
+          restLevel: { type: "string", enum: ["low", "medium", "high", "aggressive", "off"] },
+          human_behavior_rest_level: { type: "string", enum: ["low", "medium", "high", "aggressive", "off"] },
+          humanBehaviorRestLevel: { type: "string", enum: ["low", "medium", "high", "aggressive", "off"] },
+          human_behavior_enabled: { type: "boolean" },
+          humanBehaviorEnabled: { type: "boolean" },
           allow_request_resume: { type: "boolean" }
         },
-        required: ["candidate_limit", "job", "unread_only", "criteria"],
+        required: ["candidate_limit", "job", "unread_only"],
         additionalProperties: false
       }
     };
@@ -625,11 +647,13 @@ export async function handleJsonRpc(message, workspaceRoot = getWorkspaceRoot(),
         status: "OK",
         summary: summarizeChatOptions(discovery),
         chatUsage: {
-          requiredStartArgs: ["candidate_limit", "job", "unread_only", "criteria"],
+          requiredStartArgs: ["candidate_limit", "job", "unread_only"],
+          optionalStartArgs: ["criteria"],
           jobSource: "jobs[].title",
-          candidateLimitMeaning: "正整数=目标成功索要简历人数；all/全部/所有/扫到底/扫完所有人选=扫完所有可见候选人直到列表底部或平台上限。",
+          emptyCriteriaMode: "collect_cv",
+          candidateLimitMeaning: "正整数=目标成功索要简历或已满足简历收集的人数；all/全部/所有/扫到底/扫完所有人选=扫完所有可见候选人直到列表底部或平台上限。",
           unreadOnlyMeaning: "true=勾选未读，只从未读开始；false=取消未读，扫全部会话",
-          note: "liepin_chat_start 默认执行 chat_screening，会按岗位和未读设置准备页面。"
+          note: "liepin_chat_start 默认执行 chat_screening；criteria 留空时不调用 LLM，进入 collect_cv 模式。"
         },
         jobs: discovery.jobs,
         unread: discovery.unread,
@@ -772,7 +796,7 @@ async function runStartPreflight({
     fix: true,
     requireChatPage: targetPage === "chat",
     targetPage,
-    requireScreeningConfig: !input.mock_llm
+    requireScreeningConfig: requiresScreeningConfigForStart(input)
   });
   if (doctor?.ok && shouldValidateSearchStartOptions(kind, input)) {
     const searchOptions = await validateAndCanonicalizeSearchStartInput(input, {
@@ -799,6 +823,14 @@ function shouldValidateSearchStartOptions(kind, input = {}) {
     && input.workflow === RUN_WORKFLOWS.SEARCH_CHAT_CHAIN
     && !input.mock_llm
   );
+}
+
+function requiresScreeningConfigForStart(input = {}) {
+  if (input.mock_llm) return false;
+  if (input.workflow === RUN_WORKFLOWS.CHAT_SCREENING && !normalizeText(input.criteria)) {
+    return false;
+  }
+  return true;
 }
 
 async function validateAndCanonicalizeSearchStartInput(input = {}, {
@@ -916,7 +948,7 @@ function assertNotChatOnlyMisroute(toolName, args = {}) {
   if (!hasUnreadOnly && !hasChatOnlyWorkflow) return;
 
   const error = new Error(
-    "检测到 chat-only 参数被提交到了推荐页启动工具。聊天页筛选必须调用 liepin_chat_start，并传 candidate_limit、job、unread_only、criteria。"
+    "检测到 chat-only 参数被提交到了推荐页启动工具。聊天页任务必须调用 liepin_chat_start，并传 candidate_limit、job、unread_only；criteria 可选，留空时进入 collect_cv 模式。"
   );
   error.code = "CHAT_ONLY_TOOL_MISROUTE";
   throw error;
@@ -1069,17 +1101,39 @@ function buildChatScreeningStartInput(base = {}, args = {}) {
     scan_limit: args.scan_limit || null,
     job: requireTextArg(args.job || args.job_title, "job"),
     unread_only: requireBooleanArg(args, "unread_only"),
-    criteria: requireTextArg(args.criteria || args.chat_criteria, "criteria"),
+    criteria: normalizeText(args.criteria || args.chat_criteria) || null,
     max_chars: args.max_chars || null,
     mock_decision: args.mock_decision || "fail",
     mock_post_action: args.mock_post_action || "none",
     mock_chat_decision: args.mock_chat_decision || args.mock_decision || "fail",
     mock_chat_post_action: args.mock_chat_post_action || args.mock_post_action || "none",
+    human_behavior: buildChatHumanBehaviorInput(args),
     execute_request_resume: true,
     allow_chat_action: false,
     allow_request_resume: args.allow_request_resume === undefined
       ? true
       : parseOptionalBooleanArg(args.allow_request_resume, true)
+  };
+}
+
+function buildChatHumanBehaviorInput(args = {}) {
+  const explicit = args.human_behavior ?? args.humanBehavior;
+  if (explicit !== undefined && explicit !== null) return explicit;
+  const restLevel = normalizeText(
+    args.rest_level
+    || args.restLevel
+    || args.human_behavior_rest_level
+    || args.humanBehaviorRestLevel
+  ) || normalizeText(process.env.SOURCING_LIEPIN_CHAT_REST_LEVEL)
+    || normalizeText(process.env.SOURCING_BOSS_CHAT_REST_LEVEL)
+    || DEFAULT_CHAT_REST_LEVEL;
+  const enabled = parseOptionalBooleanArg(
+    args.human_behavior_enabled ?? args.humanBehaviorEnabled,
+    null
+  );
+  return {
+    restLevel,
+    ...(enabled === null ? {} : { enabled })
   };
 }
 

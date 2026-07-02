@@ -2,12 +2,140 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  classifyChatCvCollectionState,
+  CHAT_CV_REQUEST_DAILY_LIMIT_STATUS,
+  CHAT_RUN_MODES,
+  DEFAULT_CHAT_REST_LEVEL,
+  findNextUnseenChatRowIndex,
+  hasChatResumeRequestMessage,
+  isChatCvRequestDailyLimitState,
   isChatRequestSuccessState,
+  normalizeChatRestLevel,
   requestResumeWithRetry,
+  restAfterChatCandidate,
+  resolveChatHumanRestPolicy,
   resolveChatScreeningScrollStopReason,
   shouldRequestResumeForDecision,
   summarizeChatScreening
 } from "./chat-screening.js";
+
+test("classifyChatCvCollectionState treats pending button or request message as fulfilled", () => {
+  assert.deepEqual(classifyChatCvCollectionState({
+    rowType: "candidate",
+    resumeState: "索要中"
+  }), {
+    fulfilled: true,
+    shouldRequest: false,
+    status: "cv_request_already_pending",
+    reason: "resume_request_already_pending",
+    resumeState: "索要中"
+  });
+
+  const byMessage = classifyChatCvCollectionState({
+    rowType: "candidate",
+    resumeState: "索要简历"
+  }, {
+    resumeState: "索要简历",
+    latestSuccessMessage: "我想要一份你的简历，你是否同意？"
+  });
+  assert.equal(byMessage.fulfilled, true);
+  assert.equal(byMessage.status, "cv_request_already_sent");
+  assert.equal(byMessage.reason, "resume_request_message_found");
+
+  const requestable = classifyChatCvCollectionState({
+    rowType: "candidate",
+    resumeState: "索要简历"
+  });
+  assert.equal(requestable.fulfilled, false);
+  assert.equal(requestable.shouldRequest, true);
+
+  const available = classifyChatCvCollectionState({
+    rowType: "candidate",
+    resumeState: "看简历"
+  });
+  assert.equal(available.fulfilled, true);
+  assert.equal(available.status, "cv_already_available");
+});
+
+test("hasChatResumeRequestMessage detects request-message evidence", () => {
+  assert.equal(hasChatResumeRequestMessage({ successMessageCount: 1 }), true);
+  assert.equal(hasChatResumeRequestMessage({ latestSuccessMessage: "我想要一份你的简历" }), true);
+  assert.equal(hasChatResumeRequestMessage({ allSuccessMessages: ["我想要一份你的简历"] }), true);
+  assert.equal(hasChatResumeRequestMessage({ successMessageCount: 0 }), false);
+});
+
+test("isChatCvRequestDailyLimitState detects daily request quota toast", () => {
+  assert.equal(isChatCvRequestDailyLimitState({
+    toastTexts: ["今日索要已达上限"],
+    latestToastText: "今日索要已达上限"
+  }), true);
+  assert.equal(isChatCvRequestDailyLimitState({
+    bodyTextTail: "其他提示 索要已达上限"
+  }), true);
+  assert.equal(isChatCvRequestDailyLimitState({
+    toastTexts: ["索要简历成功"]
+  }), false);
+});
+
+test("chat rest policy defaults to aggressive high and accepts Boss-compatible inputs", () => {
+  assert.equal(DEFAULT_CHAT_REST_LEVEL, "high");
+  assert.equal(normalizeChatRestLevel("aggressive"), "high");
+  assert.equal(resolveChatHumanRestPolicy().restLevel, "high");
+  assert.deepEqual(resolveChatHumanRestPolicy({
+    human_behavior: { restLevel: "medium" }
+  }).restLevel, "medium");
+  assert.equal(resolveChatHumanRestPolicy({}, {
+    SOURCING_BOSS_CHAT_REST_LEVEL: "low"
+  }).restLevel, "low");
+  assert.equal(resolveChatHumanRestPolicy({ rest_level: "off" }).enabled, false);
+});
+
+test("restAfterChatCandidate rests only for collect-CV candidate rows", async () => {
+  const policy = {
+    enabled: true,
+    restLevel: "high",
+    collectCvPerCandidateRestMinMs: 5,
+    collectCvPerCandidateRestMaxMs: 5
+  };
+  const skipped = await restAfterChatCandidate({
+    collectCvMode: true,
+    humanRest: policy,
+    state: { rowType: "system", rowIndex: 0 },
+    sleepFn: () => {
+      throw new Error("system rows should not rest");
+    }
+  });
+  assert.equal(skipped.rested, false);
+
+  const sleeps = [];
+  const progress = [];
+  const rested = await restAfterChatCandidate({
+    collectCvMode: true,
+    humanRest: policy,
+    state: {
+      rowType: "candidate",
+      rowIndex: 2,
+      rowKey: "candidate-2",
+      resumeState: "索要简历"
+    },
+    counters: {
+      processedCandidates: 2,
+      humanRestCount: 3,
+      humanRestMs: 40
+    },
+    emitProgress: (stage, status, payload) => progress.push({ stage, status, payload }),
+    sleepFn: async (ms) => sleeps.push(ms)
+  });
+
+  assert.equal(rested.rested, true);
+  assert.equal(rested.restMs, 5);
+  assert.deepEqual(sleeps, [5]);
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0].stage, "human_rest");
+  assert.equal(progress[0].payload.humanRestCount, 4);
+  assert.equal(progress[0].payload.humanRestMs, 45);
+  assert.equal(progress[0].payload.currentRowKey, "candidate-2");
+});
 
 test("shouldRequestResumeForDecision only executes for pass + request_resume", () => {
   assert.equal(shouldRequestResumeForDecision({ decision: "pass", post_action: "request_resume" }), true);
@@ -80,6 +208,35 @@ test("requestResumeWithRetry stops after three failed attempts", async () => {
   assert.equal(result.attempts.length, 3);
 });
 
+test("requestResumeWithRetry stops immediately on daily request quota", async () => {
+  const client = createRequestResumeFakeClient([
+    { resumeState: "索要简历", successMessageCount: 0 },
+    { resumeState: "索要简历", successMessageCount: 0 },
+    {
+      resumeState: "索要简历",
+      successMessageCount: 0,
+      toastTexts: ["今日索要已达上限"],
+      latestToastText: "今日索要已达上限"
+    }
+  ]);
+
+  const result = await requestResumeWithRetry(client, {
+    beforeState: { rowKey: "candidate-1", resumeState: "索要简历" },
+    maxAttempts: 3,
+    clickSettleMs: 0,
+    verifyDelayMs: 0,
+    retryDelayMs: 0
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, CHAT_CV_REQUEST_DAILY_LIMIT_STATUS);
+  assert.equal(result.quotaExhausted, true);
+  assert.equal(result.dailyLimitReached, true);
+  assert.equal(result.clickedAttempts, 1);
+  assert.equal(result.attempts.length, 1);
+  assert.equal(result.attempts[0].status, CHAT_CV_REQUEST_DAILY_LIMIT_STATUS);
+});
+
 test("summarizeChatScreening reports candidate_limit as target successes", () => {
   const summary = summarizeChatScreening({
     passed: true,
@@ -122,6 +279,35 @@ test("summarizeChatScreening reports all-candidates target as null", () => {
   assert.equal(summary.targetRequestResumeSuccesses, null);
   assert.equal(summary.requestResumeSuccesses, 3);
   assert.equal(summary.ok, true);
+});
+
+test("summarizeChatScreening reports collect-CV counters", () => {
+  const summary = summarizeChatScreening({
+    passed: true,
+    mode: CHAT_RUN_MODES.COLLECT_CV,
+    jobTitle: "全部职位",
+    unreadOnly: false,
+    requestedCandidateLimit: 3,
+    requestResumeSuccesses: 1,
+    cvCollectionFulfillments: 3,
+    alreadyRequestedCvCount: 1,
+    alreadyAvailableCvCount: 1,
+    processedCandidates: 4,
+    screenableCandidates: 0,
+    skippedRows: 1,
+    llmCalls: 0,
+    actionClicks: 1,
+    stopReason: "candidate_limit_reached",
+    violations: []
+  });
+
+  assert.equal(summary.mode, "collect_cv");
+  assert.equal(summary.targetRequestResumeSuccesses, null);
+  assert.equal(summary.targetCvCollectionFulfillments, 3);
+  assert.equal(summary.cvCollectionFulfillments, 3);
+  assert.equal(summary.requestResumeSuccesses, 1);
+  assert.equal(summary.alreadyRequestedCvCount, 1);
+  assert.equal(summary.alreadyAvailableCvCount, 1);
 });
 
 test("resolveChatScreeningScrollStopReason stops when chat list reaches bottom", () => {
@@ -167,6 +353,33 @@ test("resolveChatScreeningScrollStopReason stops after repeated full passes with
   }), "no_new_rows_after_full_pass");
 });
 
+test("findNextUnseenChatRowIndex skips seen rows before activation", () => {
+  const seenRows = new Set(["row-0", "row-1", "row-2"]);
+  assert.equal(findNextUnseenChatRowIndex({
+    rows: [
+      { index: 0, rowKey: "row-0" },
+      { index: 1, rowKey: "row-1" },
+      { index: 2, rowKey: "row-2" },
+      { index: 3, rowKey: "row-3" }
+    ]
+  }, seenRows), 3);
+  assert.equal(findNextUnseenChatRowIndex({
+    rows: [
+      { index: 0, rowKey: "row-0" },
+      { index: 1, rowKey: "row-1" }
+    ]
+  }, seenRows), 2);
+  assert.equal(findNextUnseenChatRowIndex({
+    rows: [
+      { index: 0, rowKey: "row-0" },
+      { index: 1, rowKey: "new-top-row" },
+      { index: 2, rowKey: "row-2" },
+      { index: 3, rowKey: "row-3" }
+    ]
+  }, seenRows, { minimumIndex: 3 }), 3);
+  assert.equal(findNextUnseenChatRowIndex({}, seenRows), 0);
+});
+
 function createRequestResumeFakeClient(states) {
   let readIndex = 0;
   const calls = [];
@@ -200,7 +413,10 @@ function createRequestResumeFakeClient(states) {
           resumeState: next.resumeState,
           successMessageCount: next.successMessageCount || 0,
           latestSuccessMessage: next.latestSuccessMessage || "",
-          allSuccessMessages: []
+          allSuccessMessages: [],
+          toastTexts: next.toastTexts || [],
+          latestToastText: next.latestToastText || "",
+          bodyTextTail: next.bodyTextTail || ""
         };
       }
       throw new Error(`Unexpected evaluate call: ${source.slice(0, 100)}`);
