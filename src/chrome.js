@@ -14,6 +14,12 @@ export const REQUIRED_CHROME_DEBUG_FLAGS = [
   "--disable-renderer-backgrounding",
   "--disable-features=CalculateNativeWinOcclusion"
 ];
+export const VIEWPORT_COLLAPSED_MARKER = "viewport_collapsed";
+export const DEFAULT_VIEWPORT_HEALTH_OPTIONS = {
+  minOuterWidth: 1200,
+  minInnerWidth: 1000,
+  maxOuterInnerRatio: 1.35
+};
 
 export async function connectToChrome({ port = DEFAULT_DEBUG_PORT } = {}) {
   const resolvedPort = parsePositiveInteger(port, DEFAULT_DEBUG_PORT);
@@ -217,6 +223,7 @@ export function buildChromeDebugLaunchArgs({
     userDataDir ? `--user-data-dir=${userDataDir}` : null,
     "--no-first-run",
     "--no-default-browser-check",
+    "--start-maximized",
     ...REQUIRED_CHROME_DEBUG_FLAGS,
     ...parseChromeExtraArgs(process.env.LIEPIN_EXTRA_CHROME_ARGS),
     ...extraArgs
@@ -836,6 +843,208 @@ export async function waitForTarget({ port = DEFAULT_DEBUG_PORT, knownTargetIds 
   return null;
 }
 
+export function isRendererViewportCollapsed(metrics = {}, options = {}) {
+  const resolvedOptions = {
+    ...DEFAULT_VIEWPORT_HEALTH_OPTIONS,
+    ...options
+  };
+  const runtime = metrics.runtime || metrics;
+  const windowBounds = metrics.windowBounds?.bounds || metrics.windowForTarget?.bounds || {};
+  const cssVisualViewport = metrics.layoutMetrics?.cssVisualViewport || {};
+  const outerWidth = toPositiveNumber(runtime.outerWidth)
+    || toPositiveNumber(windowBounds.width);
+  const innerWidth = toPositiveNumber(runtime.innerWidth)
+    || toPositiveNumber(cssVisualViewport.clientWidth);
+  const visualViewportWidth = toPositiveNumber(runtime.visualViewport?.width)
+    || toPositiveNumber(cssVisualViewport.clientWidth)
+    || innerWidth;
+  const wideWindow = outerWidth >= resolvedOptions.minOuterWidth
+    || toPositiveNumber(windowBounds.width) >= resolvedOptions.minOuterWidth
+    || windowBounds.windowState === "maximized";
+  const outerInnerRatio = outerWidth && innerWidth ? outerWidth / innerWidth : 1;
+  return Boolean(
+    wideWindow
+    && innerWidth > 0
+    && (
+      innerWidth < resolvedOptions.minInnerWidth
+      || visualViewportWidth < resolvedOptions.minInnerWidth
+      || outerInnerRatio > resolvedOptions.maxOuterInnerRatio
+    )
+  );
+}
+
+export async function readViewportHealth(client, { options = {} } = {}) {
+  const runtime = await client.evaluate(() => ({
+    href: location.href,
+    title: document.title,
+    innerWidth,
+    innerHeight,
+    outerWidth,
+    outerHeight,
+    devicePixelRatio,
+    screen: {
+      width: window.screen?.width || 0,
+      height: window.screen?.height || 0,
+      availWidth: window.screen?.availWidth || 0,
+      availHeight: window.screen?.availHeight || 0
+    },
+    visualViewport: window.visualViewport ? {
+      width: window.visualViewport.width,
+      height: window.visualViewport.height,
+      scale: window.visualViewport.scale,
+      pageLeft: window.visualViewport.pageLeft,
+      pageTop: window.visualViewport.pageTop
+    } : null,
+    documentElement: {
+      clientWidth: document.documentElement.clientWidth,
+      clientHeight: document.documentElement.clientHeight,
+      scrollWidth: document.documentElement.scrollWidth,
+      scrollHeight: document.documentElement.scrollHeight,
+      scrollLeft: document.documentElement.scrollLeft,
+      scrollTop: document.documentElement.scrollTop
+    },
+    body: document.body ? {
+      clientWidth: document.body.clientWidth,
+      clientHeight: document.body.clientHeight,
+      scrollWidth: document.body.scrollWidth,
+      scrollHeight: document.body.scrollHeight
+    } : null
+  }));
+  const windowForTarget = await sendOptionalCdp(client, "Browser.getWindowForTarget");
+  const windowBounds = windowForTarget.ok && windowForTarget.value?.windowId
+    ? await sendOptionalCdp(client, "Browser.getWindowBounds", { windowId: windowForTarget.value.windowId })
+    : {
+        ok: false,
+        error: {
+          message: "Browser.getWindowForTarget did not return a windowId"
+        }
+      };
+  const layoutMetrics = await sendOptionalCdp(client, "Page.getLayoutMetrics");
+  const health = {
+    marker: "",
+    capturedAt: new Date().toISOString(),
+    runtime,
+    windowForTarget: windowForTarget.ok ? windowForTarget.value : null,
+    windowBounds: windowBounds.ok ? windowBounds.value : null,
+    layoutMetrics: layoutMetrics.ok ? layoutMetrics.value : null,
+    errors: [
+      windowForTarget.ok ? null : { method: "Browser.getWindowForTarget", ...windowForTarget.error },
+      windowBounds.ok ? null : { method: "Browser.getWindowBounds", ...windowBounds.error },
+      layoutMetrics.ok ? null : { method: "Page.getLayoutMetrics", ...layoutMetrics.error }
+    ].filter(Boolean)
+  };
+  health.collapsed = isRendererViewportCollapsed(health, options);
+  health.marker = health.collapsed ? VIEWPORT_COLLAPSED_MARKER : "";
+  health.summary = summarizeViewportHealth(health);
+  return health;
+}
+
+export async function recoverCollapsedViewport(client, {
+  options = {},
+  settleMs = 250,
+  allowWindowMaximize = true,
+  allowDeviceMetricsFallback = true
+} = {}) {
+  const resolvedOptions = {
+    ...DEFAULT_VIEWPORT_HEALTH_OPTIONS,
+    ...options
+  };
+  const before = await readViewportHealth(client, { options: resolvedOptions });
+  const result = {
+    type: VIEWPORT_COLLAPSED_MARKER,
+    needed: before.collapsed,
+    recovered: !before.collapsed,
+    marker: before.marker,
+    actions: [],
+    before,
+    after: before
+  };
+  if (!before.collapsed) return result;
+
+  result.actions.push(await runViewportRecoveryAction(client, "Emulation.clearDeviceMetricsOverride"));
+  result.actions.push(await runViewportRecoveryAction(client, "Emulation.setPageScaleFactor", {
+    pageScaleFactor: 1
+  }));
+
+  if (allowWindowMaximize && before.windowForTarget?.windowId) {
+    const windowRecovery = await recoverViewportWithWindowBounce(client, before, resolvedOptions, { settleMs });
+    result.actions.push(...windowRecovery.actions);
+    result.after = windowRecovery.after;
+    result.recovered = !result.after.collapsed;
+    result.marker = result.after.collapsed ? VIEWPORT_COLLAPSED_MARKER : "";
+    if (result.recovered) return result;
+  }
+
+  if (allowDeviceMetricsFallback) {
+    const desiredMetrics = buildWideDeviceMetricsOverride(result.after || before, resolvedOptions);
+    if (desiredMetrics) {
+      result.actions.push(await runViewportRecoveryAction(client, "Emulation.setDeviceMetricsOverride", desiredMetrics));
+    }
+  }
+
+  if (settleMs > 0) await sleep(settleMs);
+  result.after = await readViewportHealth(client, { options: resolvedOptions });
+  result.recovered = !result.after.collapsed;
+  result.marker = result.after.collapsed ? VIEWPORT_COLLAPSED_MARKER : "";
+  return result;
+}
+
+async function recoverViewportWithWindowBounce(client, health, options, { settleMs = 250 } = {}) {
+  const windowId = health.windowForTarget?.windowId;
+  const actions = [];
+  if (!windowId) {
+    return {
+      actions,
+      after: health
+    };
+  }
+
+  const wideBounds = buildWideWindowBounds(health, options);
+  const bounceSteps = [
+    { windowState: "normal" },
+    wideBounds,
+    { windowState: "maximized" }
+  ];
+
+  for (const bounds of bounceSteps) {
+    actions.push(await runViewportRecoveryAction(client, "Browser.setWindowBounds", {
+      windowId,
+      bounds
+    }));
+    if (settleMs > 0) await sleep(settleMs);
+  }
+
+  let after = await readViewportHealth(client, { options });
+  if (!after.collapsed) {
+    return {
+      actions,
+      after
+    };
+  }
+
+  // Some Chrome/Windows states only recompute the renderer viewport after a full state bounce.
+  actions.push(await runViewportRecoveryAction(client, "Browser.setWindowBounds", {
+    windowId,
+    bounds: {
+      windowState: "minimized"
+    }
+  }));
+  if (settleMs > 0) await sleep(settleMs);
+  actions.push(await runViewportRecoveryAction(client, "Browser.setWindowBounds", {
+    windowId,
+    bounds: {
+      windowState: "maximized"
+    }
+  }));
+  if (settleMs > 0) await sleep(settleMs);
+
+  after = await readViewportHealth(client, { options });
+  return {
+    actions,
+    after
+  };
+}
+
 async function navigateExistingOrOpenNewTarget({ port, pages, url }) {
   const source = pages.recommend || pages.search || pages.chat || pages.resumeDetail || pages.all?.find((item) => item.kind === "other");
   if (source?.webSocketDebuggerUrl) {
@@ -855,6 +1064,142 @@ async function navigateExistingOrOpenNewTarget({ port, pages, url }) {
     }
   }
   return openNewTarget({ port, url });
+}
+
+function summarizeViewportHealth(health = {}) {
+  const runtime = health.runtime || {};
+  const windowBounds = health.windowBounds?.bounds || {};
+  const cssVisualViewport = health.layoutMetrics?.cssVisualViewport || {};
+  const innerWidth = toPositiveNumber(runtime.innerWidth)
+    || toPositiveNumber(cssVisualViewport.clientWidth);
+  const outerWidth = toPositiveNumber(runtime.outerWidth)
+    || toPositiveNumber(windowBounds.width);
+  return {
+    collapsed: Boolean(health.collapsed),
+    innerWidth,
+    innerHeight: toPositiveNumber(runtime.innerHeight),
+    outerWidth,
+    outerHeight: toPositiveNumber(runtime.outerHeight),
+    visualViewportWidth: toPositiveNumber(runtime.visualViewport?.width)
+      || toPositiveNumber(cssVisualViewport.clientWidth),
+    visualViewportHeight: toPositiveNumber(runtime.visualViewport?.height)
+      || toPositiveNumber(cssVisualViewport.clientHeight),
+    devicePixelRatio: toPositiveNumber(runtime.devicePixelRatio),
+    documentClientWidth: toPositiveNumber(runtime.documentElement?.clientWidth),
+    documentScrollWidth: toPositiveNumber(runtime.documentElement?.scrollWidth),
+    windowState: windowBounds.windowState || "",
+    windowWidth: toPositiveNumber(windowBounds.width),
+    windowHeight: toPositiveNumber(windowBounds.height),
+    outerInnerRatio: outerWidth && innerWidth ? outerWidth / innerWidth : 0
+  };
+}
+
+function buildWideWindowBounds(health = {}, options = {}) {
+  const runtime = health.runtime || {};
+  const bounds = health.windowBounds?.bounds || health.windowForTarget?.bounds || {};
+  const screen = runtime.screen || {};
+  const width = Math.max(
+    options.minOuterWidth || DEFAULT_VIEWPORT_HEALTH_OPTIONS.minOuterWidth,
+    Math.floor(
+      toPositiveNumber(runtime.outerWidth)
+      || toPositiveNumber(screen.availWidth)
+      || toPositiveNumber(bounds.width)
+      || 1280
+    )
+  );
+  const height = Math.max(
+    720,
+    Math.floor(
+      toPositiveNumber(runtime.outerHeight)
+      || toPositiveNumber(screen.availHeight)
+      || toPositiveNumber(bounds.height)
+      || 800
+    )
+  );
+  return {
+    left: toFiniteInteger(bounds.left, 0),
+    top: toFiniteInteger(bounds.top, 0),
+    width,
+    height
+  };
+}
+
+function buildWideDeviceMetricsOverride(health = {}, options = {}) {
+  const runtime = health.runtime || {};
+  const bounds = health.windowBounds?.bounds || {};
+  const screen = runtime.screen || {};
+  const width = Math.max(
+    options.minInnerWidth || DEFAULT_VIEWPORT_HEALTH_OPTIONS.minInnerWidth,
+    Math.floor(
+      toPositiveNumber(runtime.outerWidth)
+      || toPositiveNumber(screen.availWidth)
+      || toPositiveNumber(bounds.width)
+      || 1280
+    )
+  );
+  const height = Math.max(
+    700,
+    Math.floor(
+      toPositiveNumber(runtime.outerHeight)
+      || toPositiveNumber(screen.availHeight)
+      || toPositiveNumber(bounds.height)
+      || 800
+    )
+  );
+  return {
+    width,
+    height,
+    deviceScaleFactor: toPositiveNumber(runtime.devicePixelRatio) || 1,
+    mobile: false,
+    scale: 1
+  };
+}
+
+async function runViewportRecoveryAction(client, method, params = {}) {
+  try {
+    await client.send(method, params);
+    return {
+      method,
+      ok: true,
+      params
+    };
+  } catch (error) {
+    return {
+      method,
+      ok: false,
+      params,
+      error: {
+        message: error?.message || String(error)
+      }
+    };
+  }
+}
+
+async function sendOptionalCdp(client, method, params = {}) {
+  try {
+    return {
+      ok: true,
+      value: await client.send(method, params)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      value: null,
+      error: {
+        message: error?.message || String(error)
+      }
+    };
+  }
+}
+
+function toPositiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function toFiniteInteger(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.floor(number) : fallback;
 }
 
 async function openNewTarget({ port, url, fallbackError = null }) {

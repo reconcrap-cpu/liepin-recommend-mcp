@@ -166,6 +166,54 @@ test("runStructuredScreening requests reasoning controls and parses streamed CoT
   });
 });
 
+test("runStructuredScreening times out a stalled streaming body and retries", async () => {
+  let calls = 0;
+  const streamBody = [
+    "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"decision\\\":\\\"fail\\\",\\\"post_action\\\":\\\"none\\\"}\"}}]}",
+    "",
+    "data: [DONE]",
+    ""
+  ].join("\n");
+  const result = await runStructuredScreening({
+    mode: "recommend",
+    screenInput,
+    config: {
+      baseUrl: "https://llm.example/v1",
+      apiKey: "sk-test",
+      model: "test-model",
+      reasoningEffort: "low",
+      reasoningStream: true,
+      llmTimeoutMs: 5,
+      llmMaxRetries: 1,
+      llmRetryDelayMs: 0
+    },
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: true,
+          headers: {
+            get: () => "text/event-stream"
+          },
+          text: async () => new Promise(() => {})
+        };
+      }
+      return new Response(streamBody, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream"
+        }
+      });
+    }
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(result.decision, {
+    decision: "fail",
+    post_action: "none"
+  });
+});
+
 test("runStructuredScreening captures DeepSeek streamed reasoning through generic thinking fallback", async () => {
   const payloads = [];
   let calls = 0;

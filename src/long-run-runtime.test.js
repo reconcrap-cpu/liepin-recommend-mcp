@@ -31,6 +31,13 @@ test("classifyLongRunFailure separates terminal and recoverable failures", () =>
     reason: "transient_browser_or_cdp_failure",
     recoverable: true
   });
+  assert.deepEqual(classifyLongRunFailure(Object.assign(new Error("搜索页候选人卡片未出现"), {
+    code: "SEARCH_CARDS_NOT_FOUND"
+  })), {
+    category: "recoverable",
+    reason: "transient_browser_or_cdp_failure",
+    recoverable: true
+  });
   assert.deepEqual(classifyLongRunFailure(new Error("购买开聊卡")), {
     category: "terminal",
     reason: "communication_quota_exhausted",

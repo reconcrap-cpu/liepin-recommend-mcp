@@ -176,21 +176,24 @@ async function callOpenAiCompatibleJson({ config, request, fetchImpl }) {
       ? setTimeout(() => controller.abort(), timeoutMs)
       : null;
     try {
-      const response = await fetchImpl(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller?.signal
-      });
+      const response = await withLlmTimeout(
+        fetchImpl(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller?.signal
+        }),
+        { timeoutMs, controller, phase: "request" }
+      );
       if (response.ok) {
         return requestBody.stream === true || isStreamResponse(response)
-          ? parseOpenAiCompatibleStream(response)
-          : response.json();
+          ? await parseOpenAiCompatibleStream(response, { timeoutMs, controller })
+          : await withLlmTimeout(response.json(), { timeoutMs, controller, phase: "response_json" });
       }
-      const responseText = await readResponseText(response);
+      const responseText = await readResponseText(response, { timeoutMs, controller });
       const downgrade = selectCompatibilityDowngrade({
         requestBody,
         response,
@@ -344,8 +347,15 @@ function isStreamResponse(response) {
   return contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson");
 }
 
-async function parseOpenAiCompatibleStream(response) {
-  const text = await readResponseText(response);
+async function parseOpenAiCompatibleStream(response, {
+  timeoutMs = 120000,
+  controller = null
+} = {}) {
+  const text = await readResponseText(response, {
+    timeoutMs,
+    controller,
+    phase: "response_stream"
+  });
   const chunks = parseStreamChunks(text);
   if (chunks.length === 0) return JSON.parse(text);
   return assembleStreamedChatCompletion(chunks);
@@ -447,11 +457,16 @@ function collectResponseApiStreamText(chunk, target) {
   collectStreamNestedText(chunk?.reasoning, target.reasoning);
 }
 
-async function readResponseText(response) {
+async function readResponseText(response, {
+  timeoutMs = 120000,
+  controller = null,
+  phase = "response_text"
+} = {}) {
   if (typeof response?.text !== "function") return "";
   try {
-    return await response.text();
-  } catch {
+    return await withLlmTimeout(response.text(), { timeoutMs, controller, phase });
+  } catch (error) {
+    if (error?.code === "LLM_TIMEOUT" || error?.name === "AbortError") throw error;
     return "";
   }
 }
@@ -685,10 +700,40 @@ function shouldRetryError(error) {
 }
 
 function normalizeFetchError(error, attempt, maxRetries) {
+  if (error?.code === "LLM_TIMEOUT") {
+    error.message = `${error.message}${attempt < maxRetries ? ", retrying" : ""}`;
+    return error;
+  }
   if (error?.name === "AbortError") {
     return new Error(`LLM request timed out${attempt < maxRetries ? ", retrying" : ""}`);
   }
   return error;
+}
+
+function withLlmTimeout(promise, {
+  timeoutMs,
+  controller = null,
+  phase = "request"
+} = {}) {
+  const resolvedTimeoutMs = parsePositiveInteger(timeoutMs, 120000);
+  if (!resolvedTimeoutMs || resolvedTimeoutMs <= 0) return promise;
+  let timeout = null;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timeout = setTimeout(() => {
+        try {
+          controller?.abort?.();
+        } catch {}
+        const error = new Error(`LLM request timed out after ${resolvedTimeoutMs}ms during ${phase}`);
+        error.code = "LLM_TIMEOUT";
+        error.phase = phase;
+        reject(error);
+      }, resolvedTimeoutMs);
+    })
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 async function waitBeforeLlmRetry({

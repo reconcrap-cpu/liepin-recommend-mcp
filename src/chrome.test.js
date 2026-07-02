@@ -11,7 +11,9 @@ import {
   getMissingRequiredChromeFlags,
   isCdpRuntimeTimeoutError,
   isLiepinRiskPageUrl,
+  isRendererViewportCollapsed,
   MIN_CDP_WAIT_EVALUATE_TIMEOUT_MS,
+  recoverCollapsedViewport,
   REQUIRED_CHROME_DEBUG_FLAGS
 } from "./chrome.js";
 
@@ -69,6 +71,248 @@ test("buildChromeDebugLaunchArgs includes required flags once", () => {
     }
   }
   assert.deepEqual(getMissingRequiredChromeFlags(args), []);
+  assert.equal(args.includes("--start-maximized"), true);
+});
+
+test("isRendererViewportCollapsed detects a narrow renderer inside a wide maximized Chrome window", () => {
+  assert.equal(isRendererViewportCollapsed({
+    runtime: {
+      innerWidth: 800,
+      outerWidth: 1440,
+      visualViewport: {
+        width: 785
+      }
+    },
+    windowBounds: {
+      bounds: {
+        width: 1454,
+        height: 874,
+        windowState: "maximized"
+      }
+    }
+  }), true);
+
+  assert.equal(isRendererViewportCollapsed({
+    runtime: {
+      innerWidth: 1380,
+      outerWidth: 1440,
+      visualViewport: {
+        width: 1365
+      }
+    },
+    windowBounds: {
+      bounds: {
+        width: 1454,
+        height: 874,
+        windowState: "maximized"
+      }
+    }
+  }), false);
+});
+
+test("recoverCollapsedViewport bounces the Chrome window before using device metrics", async () => {
+  let collapsed = true;
+  let sawNormal = false;
+  let sawWideBounds = false;
+  const calls = [];
+  const client = {
+    async evaluate() {
+      return collapsed
+        ? {
+            innerWidth: 800,
+            innerHeight: 600,
+            outerWidth: 1440,
+            outerHeight: 860,
+            devicePixelRatio: 2,
+            screen: {
+              availWidth: 1440,
+              availHeight: 900
+            },
+            visualViewport: {
+              width: 785,
+              height: 585
+            },
+            documentElement: {
+              clientWidth: 785,
+              clientHeight: 585,
+              scrollWidth: 1260,
+              scrollHeight: 3968
+            }
+          }
+        : {
+            innerWidth: 1440,
+            innerHeight: 860,
+            outerWidth: 1440,
+            outerHeight: 860,
+            devicePixelRatio: 2,
+            screen: {
+              availWidth: 1440,
+              availHeight: 900
+            },
+            visualViewport: {
+              width: 1425,
+              height: 845
+            },
+            documentElement: {
+              clientWidth: 1425,
+              clientHeight: 845,
+              scrollWidth: 1425,
+              scrollHeight: 3968
+            }
+          };
+    },
+    async send(method, params = {}) {
+      calls.push({ method, params });
+      if (method === "Browser.getWindowForTarget") {
+        return {
+          windowId: 1,
+          bounds: {
+            width: 1454,
+            height: 874,
+            windowState: "maximized"
+          }
+        };
+      }
+      if (method === "Browser.getWindowBounds") {
+        return {
+          bounds: {
+            width: 1454,
+            height: 874,
+            windowState: "maximized"
+          }
+        };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return {
+          cssVisualViewport: {
+            clientWidth: collapsed ? 785 : 1425,
+            clientHeight: collapsed ? 585 : 845
+          }
+        };
+      }
+      if (method === "Browser.setWindowBounds") {
+        if (params.bounds?.windowState === "normal") sawNormal = true;
+        if (params.bounds?.width >= 1200 && params.bounds?.height >= 720) sawWideBounds = true;
+        if (params.bounds?.windowState === "maximized" && sawNormal && sawWideBounds) collapsed = false;
+        return {};
+      }
+      if (method === "Emulation.setDeviceMetricsOverride") {
+        throw new Error("device metrics fallback should not be needed after window recovery");
+      }
+      return {};
+    }
+  };
+
+  const recovery = await recoverCollapsedViewport(client, { settleMs: 0 });
+
+  assert.equal(recovery.needed, true);
+  assert.equal(recovery.recovered, true);
+  assert.equal(calls.some((call) => call.method === "Emulation.clearDeviceMetricsOverride"), true);
+  assert.equal(calls.some((call) => call.method === "Browser.setWindowBounds" && call.params.bounds?.windowState === "normal"), true);
+  assert.equal(calls.some((call) => call.method === "Browser.setWindowBounds" && call.params.bounds?.width >= 1200), true);
+  assert.equal(calls.some((call) => call.method === "Browser.setWindowBounds" && call.params.bounds?.windowState === "maximized"), true);
+  assert.equal(calls.some((call) => call.method === "Emulation.setDeviceMetricsOverride"), false);
+});
+
+test("recoverCollapsedViewport falls back to wide device metrics when window bounce does not recover", async () => {
+  let collapsed = true;
+  const calls = [];
+  const client = {
+    async evaluate() {
+      return collapsed
+        ? {
+            innerWidth: 800,
+            innerHeight: 600,
+            outerWidth: 1440,
+            outerHeight: 860,
+            devicePixelRatio: 2,
+            screen: {
+              availWidth: 1440,
+              availHeight: 900
+            },
+            visualViewport: {
+              width: 785,
+              height: 585
+            },
+            documentElement: {
+              clientWidth: 785,
+              clientHeight: 585,
+              scrollWidth: 1260,
+              scrollHeight: 3968
+            }
+          }
+        : {
+            innerWidth: 1440,
+            innerHeight: 860,
+            outerWidth: 1440,
+            outerHeight: 860,
+            devicePixelRatio: 2,
+            screen: {
+              availWidth: 1440,
+              availHeight: 900
+            },
+            visualViewport: {
+              width: 1425,
+              height: 845
+            },
+            documentElement: {
+              clientWidth: 1425,
+              clientHeight: 845,
+              scrollWidth: 1425,
+              scrollHeight: 3968
+            }
+          };
+    },
+    async send(method, params = {}) {
+      calls.push({ method, params });
+      if (method === "Browser.getWindowForTarget") {
+        return {
+          windowId: 1,
+          bounds: {
+            width: 1454,
+            height: 874,
+            windowState: "maximized"
+          }
+        };
+      }
+      if (method === "Browser.getWindowBounds") {
+        return {
+          bounds: {
+            width: 1454,
+            height: 874,
+            windowState: "maximized"
+          }
+        };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return {
+          cssVisualViewport: {
+            clientWidth: collapsed ? 785 : 1425,
+            clientHeight: collapsed ? 585 : 845
+          }
+        };
+      }
+      if (method === "Browser.setWindowBounds") {
+        return {};
+      }
+      if (method === "Emulation.setDeviceMetricsOverride") {
+        collapsed = false;
+        return {};
+      }
+      return {};
+    }
+  };
+
+  const recovery = await recoverCollapsedViewport(client, { settleMs: 0 });
+
+  assert.equal(recovery.needed, true);
+  assert.equal(recovery.recovered, true);
+  assert.equal(calls.some((call) => call.method === "Browser.setWindowBounds"), true);
+  const metricsCall = calls.find((call) => call.method === "Emulation.setDeviceMetricsOverride");
+  assert.equal(metricsCall.params.width, 1440);
+  assert.equal(metricsCall.params.height, 860);
+  assert.equal(metricsCall.params.deviceScaleFactor, 2);
+  assert.equal(metricsCall.params.mobile, false);
 });
 
 test("getMissingRequiredChromeFlags detects shadowed disable-features switches", () => {

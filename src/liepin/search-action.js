@@ -474,8 +474,13 @@ export async function readSearchListState(client) {
     const fallbackCards = [...document.querySelectorAll(selectors.cardWrap)]
       .filter((node) => visible(node) && !node.querySelector(".xpath-resume-card") && getText(node).length > 0);
     const cards = primaryCards.length > 0 ? primaryCards : fallbackCards;
+    const listBox = document.querySelector(selectors.listBox);
+    const pagebar = [...document.querySelectorAll(`${selectors.pagebar}, ul.ant-lpt-pagination`)]
+      .find(visible) || null;
     const activePage = [...document.querySelectorAll(`${selectors.pagebar} li`)]
       .find((node) => String(node.className || "").includes("active"));
+    const next = pagebar?.querySelector("li.ant-lpt-pagination-next") || document.querySelector(selectors.nextPageButton);
+    const nextButton = next?.querySelector("button") || next;
     return {
       url: location.href,
       title: document.title,
@@ -483,7 +488,16 @@ export async function readSearchListState(client) {
       firstCardText: getText(cards[0]).slice(0, 500),
       firstCardHead: getText(cards[0]).slice(0, 160),
       activePageText: getText(activePage),
-      listTextLength: getText(document.querySelector(selectors.listBox)).length
+      pagebarText: getText(pagebar).slice(0, 500),
+      nextExists: Boolean(next),
+      nextDisabled: Boolean(next && (
+        next.getAttribute("aria-disabled") === "true"
+        || String(next.className || "").includes("disabled")
+        || nextButton?.disabled
+      )),
+      listBoxExists: Boolean(listBox),
+      listTextLength: getText(listBox).length,
+      listTextHead: getText(listBox).slice(0, 500)
     };
   }, searchSelectors);
   return {
@@ -506,7 +520,11 @@ export async function waitForSearchCards(client, {
     timeoutMs,
     pollMs: 250
   });
-  if (!ready) throw new Error("搜索页候选人卡片未出现");
+  if (!ready) {
+    const error = new Error("搜索页候选人卡片未出现");
+    error.code = "SEARCH_CARDS_NOT_FOUND";
+    throw error;
+  }
   return {
     ready: true
   };
@@ -818,6 +836,9 @@ export async function executeSearchChatAction(client, {
       && sentGreetingUpsellModal.closed
       && isAlreadyContactedButtonText(finalAfter.text)
   );
+  const contactEvidence = ok ? null : await readSearchContactVerificationEvidence(client).catch((error) => ({
+    error: normalizeText(error?.message || error)
+  }));
   return {
     ok,
     status: ok ? "search_contacted" : "search_contact_state_not_verified",
@@ -828,8 +849,59 @@ export async function executeSearchChatAction(client, {
     confirm,
     modalClosed: Boolean(modalClosed),
     sentGreetingUpsellModal: sentGreetingUpsellModal.present ? sentGreetingUpsellModal : null,
-    after: finalAfter
+    after: finalAfter,
+    contactEvidence
   };
+}
+
+export async function readSearchContactVerificationEvidence(client) {
+  return client.evaluate((selectors) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const getText = (node) => normalize(node?.innerText || node?.textContent || "");
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const uniqueTexts = (nodes, limit = 20) => [...new Set(nodes
+      .filter(visible)
+      .map((node) => getText(node))
+      .filter(Boolean))]
+      .slice(0, limit);
+    const modalTexts = uniqueTexts([
+      ...document.querySelectorAll(".ant-lpt-modal, .ant-lpt-modal-root, [role='dialog']")
+    ], 10);
+    const toastTexts = uniqueTexts([
+      ...document.querySelectorAll(".ant-lpt-message, .ant-lpt-notification, [class*='message'], [class*='toast'], [class*='notification']")
+    ], 20);
+    const operationTexts = uniqueTexts([
+      ...document.querySelectorAll("#res_detail_operation_for_guide, [class*='operation'], [class*='record'], [class*='chat'], [class*='im']")
+    ], 30);
+    const serviceJobContainers = [...document.querySelectorAll(selectors.serviceJobContainer)]
+      .filter(visible)
+      .map((node) => ({
+        text: getText(node).slice(0, 1000),
+        className: String(node.className || "")
+      }));
+    const chatButtons = [...document.querySelectorAll(selectors.openChatButton)]
+      .filter(visible)
+      .map((node) => ({
+        text: getText(node),
+        className: String(node.className || ""),
+        disabled: Boolean(node.disabled || node.getAttribute("aria-disabled") === "true")
+      }));
+    return {
+      url: location.href,
+      title: document.title,
+      modalTexts,
+      toastTexts,
+      operationTexts,
+      serviceJobContainers,
+      chatButtons,
+      bodyTextTail: getText(document.body).slice(-1500)
+    };
+  }, searchSelectors);
 }
 
 async function waitForSearchChatActionOutcome(client, {

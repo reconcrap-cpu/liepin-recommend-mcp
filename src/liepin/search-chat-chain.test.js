@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   SEARCH_CHAT_CHAIN_SCHEMA_VERSION,
   evaluateSearchChatChain,
+  hasReachedSearchPageBoundary,
+  isSearchNoResultsListState,
   shouldExecuteSearchChat,
   summarizeSearchChatChain
 } from "./search-chat-chain.js";
@@ -13,6 +15,46 @@ test("shouldExecuteSearchChat requires pass and chat post action", () => {
   assert.equal(shouldExecuteSearchChat({ decision: "pass", post_action: "chat" }), true);
   assert.equal(shouldExecuteSearchChat({ decision: "pass", post_action: "none" }), false);
   assert.equal(shouldExecuteSearchChat({ decision: "fail", post_action: "chat" }), false);
+});
+
+test("hasReachedSearchPageBoundary uses remembered card count when list is temporarily blank", () => {
+  assert.equal(hasReachedSearchPageBoundary({
+    pageCardIndex: 20,
+    listState: { cardCount: 0 },
+    knownCardCount: 20
+  }), true);
+  assert.equal(hasReachedSearchPageBoundary({
+    pageCardIndex: 10,
+    listState: { cardCount: 0 },
+    knownCardCount: 20
+  }), false);
+});
+
+test("hasReachedSearchPageBoundary prefers visible card count when available", () => {
+  assert.equal(hasReachedSearchPageBoundary({
+    pageCardIndex: 20,
+    listState: { cardCount: 20 },
+    knownCardCount: 10
+  }), true);
+  assert.equal(hasReachedSearchPageBoundary({
+    pageCardIndex: 19,
+    listState: { cardCount: 20 },
+    knownCardCount: 20
+  }), false);
+});
+
+test("isSearchNoResultsListState recognizes Liepin empty search result copy", () => {
+  assert.equal(isSearchNoResultsListState({
+    listBoxExists: true,
+    cardCount: 0,
+    listTextHead: "没有搜索到适合的简历，赶快修改搜索条件吧! 全选 浏览简历",
+    pagebarText: ""
+  }), true);
+  assert.equal(isSearchNoResultsListState({
+    listBoxExists: true,
+    cardCount: 1,
+    listTextHead: "没有搜索到适合的简历，赶快修改搜索条件吧!"
+  }), false);
 });
 
 test("evaluateSearchChatChain counts only newly sent search greetings toward target", () => {

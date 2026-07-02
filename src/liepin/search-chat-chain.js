@@ -1,7 +1,9 @@
 import {
   createPageClient,
   discoverLiepinPages,
-  isLiepinRiskPageUrl
+  isLiepinRiskPageUrl,
+  recoverCollapsedViewport,
+  VIEWPORT_COLLAPSED_MARKER
 } from "../chrome.js";
 import {
   DEFAULT_DEBUG_PORT,
@@ -34,6 +36,7 @@ export const SEARCH_CHAT_CHAIN_SCHEMA_VERSION = "liepin_search_chat_chain_v1";
 export const SEARCH_CHAT_CHAIN_CHECKPOINT_SCHEMA_VERSION = "liepin_search_chat_chain_checkpoint_v1";
 const MAX_CONSECUTIVE_SEARCH_OPEN_RECOVERIES = 3;
 const MAX_TOTAL_SEARCH_OPEN_RECOVERIES = 25;
+const MAX_TOTAL_VIEWPORT_RECOVERIES = 10;
 
 export async function runSearchChatChain({
   port = DEFAULT_DEBUG_PORT
@@ -91,7 +94,9 @@ export async function runSearchChatChain({
   let stopReason = restoredCheckpoint?.stopReason || "";
   let currentPageNumber = restoredCheckpoint?.currentPageNumber || 1;
   let pageCardIndex = restoredCheckpoint?.pageCardIndex ?? Math.max(0, startIndex || 0);
+  let currentPageCardCount = null;
   let consecutiveOpenRecoveries = 0;
+  let viewportRecoveryCount = recoveries.filter((item) => item?.type === VIEWPORT_COLLAPSED_MARKER).length;
 
   const progressState = {
     targetCandidates: requestedCandidateLimit,
@@ -131,6 +136,7 @@ export async function runSearchChatChain({
       communicationQuotaExhausted,
       stopReason,
       violations,
+      recoveries,
       items,
       stage,
       statusMessage,
@@ -165,6 +171,7 @@ export async function runSearchChatChain({
   try {
     try {
       await assertNotRiskPage(client, "搜索串联");
+      await ensureSearchViewportHealthy("prepare_search_page");
       emitProgress("prepare_search_page", `已连接搜索页，准备 profile=${requestedProfile} job=${requestedJobTitle} hide_read=${requestedHideRead}`);
       const jobPreparation = await prepareSearchJobSelection(client, {
         jobTitle: requestedJobTitle
@@ -218,12 +225,75 @@ export async function runSearchChatChain({
         && !communicationQuotaExhausted
       ) {
         await assertNotRiskPage(client, "搜索串联扫描中");
-        await waitForSearchCards(client);
-        const listState = await readSearchListState(client);
+        await ensureSearchViewportHealthy("before_open_search_candidate");
+        let listState = await readSearchListState(client);
+        if (listState.cardCount > 0) currentPageCardCount = listState.cardCount;
+        if (isSearchNoResultsListState(listState)) {
+          stopReason = "search_no_results_before_target";
+          violations.push({
+            code: "search_no_results_before_target",
+            scannedCandidates: items.length,
+            passedCandidates,
+            greetedCandidates,
+            requestedCandidateLimit,
+            currentPageNumber,
+            pageCardIndex,
+            listState
+          });
+          break;
+        }
+        let pageBoundaryReached = hasReachedSearchPageBoundary({
+          pageCardIndex,
+          listState,
+          knownCardCount: currentPageCardCount
+        });
+        if (!pageBoundaryReached) {
+          try {
+            await waitForSearchCards(client);
+          } catch (error) {
+            listState = await readSearchListState(client).catch(() => listState);
+            if (listState?.cardCount > 0) currentPageCardCount = listState.cardCount;
+            if (isSearchNoResultsListState(listState)) {
+              stopReason = "search_no_results_before_target";
+              violations.push({
+                code: "search_no_results_before_target",
+                scannedCandidates: items.length,
+                passedCandidates,
+                greetedCandidates,
+                requestedCandidateLimit,
+                currentPageNumber,
+                pageCardIndex,
+                listState
+              });
+              break;
+            }
+            pageBoundaryReached = hasReachedSearchPageBoundary({
+              pageCardIndex,
+              listState,
+              knownCardCount: currentPageCardCount
+            });
+            if (!pageBoundaryReached) {
+              error.searchListState = listState;
+              error.pageCardIndex = pageCardIndex;
+              error.currentPageCardCount = currentPageCardCount;
+              throw error;
+            }
+          }
+        }
+        if (!pageBoundaryReached) {
+          listState = await readSearchListState(client);
+          if (listState.cardCount > 0) currentPageCardCount = listState.cardCount;
+          pageBoundaryReached = hasReachedSearchPageBoundary({
+            pageCardIndex,
+            listState,
+            knownCardCount: currentPageCardCount
+          });
+        }
         currentPageNumber = parsePageNumber(listState.activePageText, currentPageNumber);
-        if (pageCardIndex >= listState.cardCount) {
+        if (pageBoundaryReached) {
           const pagination = await waitForSearchPaginationState(client, { timeoutMs: 7000 });
           if (!pagination.nextExists || pagination.nextDisabled) {
+            stopReason = "search_last_page_reached_before_target";
             violations.push({
               code: "search_reached_last_page_before_target",
               scannedCandidates: items.length,
@@ -239,6 +309,7 @@ export async function runSearchChatChain({
           }
           const nextPage = await clickSearchNextPage(client);
           if (!nextPage.clicked) {
+            stopReason = "search_next_page_not_clicked";
             violations.push({
               code: "search_next_page_not_clicked",
               reason: nextPage.reason || "unknown",
@@ -250,8 +321,20 @@ export async function runSearchChatChain({
             });
             break;
           }
-          currentPageNumber += 1;
+          if (nextPage.verified === false) {
+            stopReason = "search_next_page_not_verified";
+            violations.push({
+              code: "search_next_page_not_verified",
+              currentPageNumber,
+              pageCardIndex,
+              listState,
+              nextPage
+            });
+            break;
+          }
+          currentPageNumber = parsePageNumber(nextPage.after?.activePageText, currentPageNumber + 1);
           pageCardIndex = 0;
+          currentPageCardCount = nextPage.afterList?.cardCount > 0 ? nextPage.afterList.cardCount : null;
           continue;
         }
 
@@ -269,6 +352,7 @@ export async function runSearchChatChain({
         let openAction = null;
         try {
           openAction = await openSearchCardByIndex(client, pageCardIndex);
+          if (openAction.cardCount > 0) currentPageCardCount = openAction.cardCount;
           consecutiveOpenRecoveries = 0;
         } catch (error) {
           const recovery = await recoverSearchOpenFailure(error, {
@@ -284,6 +368,7 @@ export async function runSearchChatChain({
           recoveries.push(recovery);
           if (recovery.openAction) {
             openAction = recovery.openAction;
+            if (openAction.cardCount > 0) currentPageCardCount = openAction.cardCount;
             consecutiveOpenRecoveries = 0;
           } else {
             consecutiveOpenRecoveries += 1;
@@ -582,6 +667,59 @@ export async function runSearchChatChain({
       items
     });
     await onCheckpoint(checkpointPayload, buildPartialWorkflowResult(stage, statusMessage));
+  }
+
+  async function ensureSearchViewportHealthy(stage) {
+    if (!recoverEnabled) return null;
+    if (viewportRecoveryCount >= MAX_TOTAL_VIEWPORT_RECOVERIES) return null;
+    let recovery = null;
+    try {
+      recovery = await recoverCollapsedViewport(client, {
+        settleMs: 150
+      });
+    } catch (error) {
+      recovery = {
+        type: VIEWPORT_COLLAPSED_MARKER,
+        needed: true,
+        recovered: false,
+        marker: VIEWPORT_COLLAPSED_MARKER,
+        actions: [],
+        error: {
+          code: normalizeText(error?.code),
+          message: normalizeText(error?.message || error)
+        }
+      };
+    }
+    if (!recovery?.needed) return recovery;
+
+    viewportRecoveryCount += 1;
+    const recoveryEntry = {
+      type: VIEWPORT_COLLAPSED_MARKER,
+      stage,
+      pageNumber: currentPageNumber,
+      cardIndex: pageCardIndex,
+      recovered: Boolean(recovery.recovered),
+      marker: VIEWPORT_COLLAPSED_MARKER,
+      reason: recovery.recovered
+        ? "renderer_viewport_recovered"
+        : "renderer_viewport_still_collapsed",
+      actions: Array.isArray(recovery.actions) ? recovery.actions : [],
+      before: recovery.before?.summary || null,
+      after: recovery.after?.summary || null,
+      error: recovery.error || null
+    };
+    recoveries.push(recoveryEntry);
+    emitProgress(
+      recoveryEntry.recovered ? "viewport_collapsed_recovered" : "viewport_collapsed",
+      recoveryEntry.recovered
+        ? "已恢复 Chrome renderer 视口宽度"
+        : "检测到 Chrome renderer 视口仍处于窄宽度",
+      {
+        currentPageNumber,
+        currentCardIndex: pageCardIndex
+      }
+    );
+    return recoveryEntry;
   }
 }
 
@@ -965,6 +1103,33 @@ async function restoreSearchCheckpointPosition(client, {
     currentPageNumber: currentPage,
     pageCardIndex: Math.max(0, pageCardIndex || 0)
   };
+}
+
+export function hasReachedSearchPageBoundary({
+  pageCardIndex = 0,
+  listState = {},
+  knownCardCount = null
+} = {}) {
+  const index = Number.isInteger(pageCardIndex)
+    ? pageCardIndex
+    : Number.parseInt(String(pageCardIndex ?? ""), 10);
+  if (!Number.isFinite(index) || index < 0) return false;
+  const visibleCount = Number.isInteger(listState?.cardCount) && listState.cardCount > 0
+    ? listState.cardCount
+    : null;
+  const rememberedCount = Number.isInteger(knownCardCount) && knownCardCount > 0
+    ? knownCardCount
+    : null;
+  const cardCount = visibleCount ?? rememberedCount;
+  return Number.isInteger(cardCount) && cardCount > 0 && index >= cardCount;
+}
+
+export function isSearchNoResultsListState(listState = {}) {
+  if (!listState?.listBoxExists || listState.cardCount !== 0) return false;
+  const text = normalizeText(`${listState.listTextHead || ""} ${listState.pagebarText || ""}`);
+  return text.includes("没有搜索到适合的简历")
+    || text.includes("没有搜索到合适的简历")
+    || text.includes("修改搜索条件");
 }
 
 function parsePageNumber(value, fallback) {

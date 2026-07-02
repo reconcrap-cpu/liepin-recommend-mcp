@@ -85,6 +85,8 @@ export function classifyLongRunFailure(error) {
     || combined.includes("could not find node")
     || combined.includes("detached")
     || combined.includes("stale")
+    || combined.includes("search_cards_not_found")
+    || combined.includes("搜索页候选人卡片未出现")
     || combined.includes("搜索详情弹窗未出现")
     || combined.includes("search detail modal")
     || combined.includes("detail modal")

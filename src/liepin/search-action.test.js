@@ -242,6 +242,95 @@ test("closes sent greeting upsell after search greeting and counts the greeting"
   assert.equal(evaluations.length, 0);
 });
 
+test("captures contact evidence when service job confirm does not verify contacted state", async () => {
+  let buttonStateReads = 0;
+  let evidenceReads = 0;
+  const queued = [
+    {
+      clicked: true,
+      text: "立即沟通",
+      className: "xpath-open-im-btn"
+    },
+    {
+      type: "service_job"
+    },
+    {
+      clicked: true,
+      requested: "科研算法工程师",
+      selectedTitle: "科研算法工程师",
+      matchType: "exact",
+      availableJobs: ["科研算法工程师"]
+    },
+    {
+      clicked: true,
+      text: "确认",
+      className: "ant-lpt-btn-primary"
+    },
+    {
+      present: true,
+      status: "sent_greeting_upsell_modal",
+      reason: "sent_greeting_upsell_modal",
+      modalText: "已向候选人发送消息 更快获取人选回复 免费发起"
+    },
+    {
+      clicked: false,
+      reason: "sent_greeting_upsell_close_not_found"
+    },
+    {
+      removed: false,
+      reason: "sent_greeting_upsell_modal_not_found"
+    }
+  ];
+  const waitResults = [true, true];
+  const client = {
+    async evaluate(fn) {
+      const source = String(fn);
+      if (source.includes("bodyTextTail")) {
+        evidenceReads += 1;
+        return {
+          url: "https://lpt.liepin.com/search#preview",
+          modalTexts: [],
+          toastTexts: ["已向候选人发送消息"],
+          operationTexts: ["操作记录 立即沟通"],
+          serviceJobContainers: [],
+          chatButtons: [{ text: "立即沟通" }]
+        };
+      }
+      if (source.includes('type: "pending"')) {
+        if (queued.length === 0) throw new Error("Unexpected evaluate call");
+        return queued.shift();
+      }
+      if (source.includes("exists: Boolean(button)") && source.includes("disabled")) {
+        buttonStateReads += 1;
+        return {
+          exists: true,
+          text: buttonStateReads === 1 ? "立即沟通" : "继续沟通",
+          className: "xpath-open-im-btn",
+          disabled: false
+        };
+      }
+      if (queued.length === 0) throw new Error("Unexpected evaluate call");
+      return queued.shift();
+    },
+    async waitFor() {
+      if (waitResults.length === 0) throw new Error("Unexpected waitFor call");
+      return waitResults.shift();
+    }
+  };
+
+  const action = await executeSearchChatAction(client, {
+    jobTitle: "科研算法工程师"
+  });
+
+  assert.equal(action.ok, false);
+  assert.equal(action.status, "search_contact_state_not_verified");
+  assert.equal(action.confirm.clicked, true);
+  assert.equal(action.modalClosed, true);
+  assert.deepEqual(action.contactEvidence.toastTexts, ["已向候选人发送消息"]);
+  assert.equal(evidenceReads, 1);
+  assert.equal(queued.length, 0);
+});
+
 test("closeSearchModalToList closes a standalone sent greeting upsell", async () => {
   const modalText = "已向候选人发送消息 更快获取人选回复 免费发起 关闭";
   const evaluations = [
